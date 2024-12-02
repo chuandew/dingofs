@@ -61,3 +61,9 @@
 [submodule "third-party/libuuid-cmake"]
 	path = third-party/libuuid-cmake
 	url = https://github.com/gershnik/libuuid-cmake.git
+[submodule "third-party/opentelemetry-cpp"]
+	path = third-party/opentelemetry-cpp
+	url = https://github.com/open-telemetry/opentelemetry-cpp.git
+[submodule "third-party/nlohmann-json"]
+	path = third-party/nlohmann-json
+	url = https://github.com/nlohmann/json.git

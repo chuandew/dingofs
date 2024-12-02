@@ -20,7 +20,7 @@
 > Created Time: Wed Dec 19 15:19:40 2018
  ************************************************************************/
 
-#include "curvefs/src/utils/s3_adapter.h"
+#include "curvefs/src/aws/s3_adapter.h"
 
 #include <aws/core/utils/stream/PreallocatedStreamBuf.h>
 #include <glog/logging.h>
@@ -30,13 +30,19 @@
 #include <string>
 #include <utility>
 
+#include "curvefs/src/aws/opentelemetry/OtelTelemetryProvider.h"
 #include "curvefs/src/utils/curve_define.h"
 #include "curvefs/src/utils/macros.h"
+#include "opentelemetry/exporters/otlp/otlp_http_exporter_factory.h"
+#include "opentelemetry/exporters/otlp/otlp_http_metric_exporter_factory.h"
+#include "opentelemetry/exporters/otlp/otlp_http_metric_exporter_options.h"
 
 #define AWS_ALLOCATE_TAG __FILE__ ":" STRINGIFY(__LINE__)
 
 namespace curvefs {
-namespace utils {
+namespace aws {
+
+using curvefs::utils::kMB;
 
 std::once_flag s3_init_flag;
 std::once_flag s3_shutdown_flag;
@@ -164,12 +170,30 @@ void S3Adapter::Init(const S3AdapterOption& option) {
   clientCfg_->executor =
       Aws::MakeShared<Aws::Utils::Threading::PooledThreadExecutor>(
           "S3Adapter.S3Client", async_thread_num);
+
+  {
+    opentelemetry::exporter::otlp::OtlpHttpExporterOptions opts;
+    auto span_exporter =
+        opentelemetry::exporter::otlp::OtlpHttpExporterFactory::Create(opts);
+
+    // otlp http  metric
+    opentelemetry::exporter::otlp::OtlpHttpMetricExporterOptions
+        exporter_options;
+    auto push_exporter =
+        opentelemetry::exporter::otlp::OtlpHttpMetricExporterFactory::Create(
+            exporter_options);
+
+    clientCfg_->telemetryProvider =
+        smithy::components::tracing::OtelTelemetryProvider::CreateOtelProvider(
+            std::move(span_exporter), std::move(push_exporter));
+  }
+
   s3Client_ = Aws::New<Aws::S3::S3Client>(
       AWS_ALLOCATE_TAG, Aws::Auth::AWSCredentials(s3Ak_, s3Sk_), *clientCfg_,
       Aws::Client::AWSAuthV4Signer::PayloadSigningPolicy::Never,
       option.useVirtualAddressing);
 
-  ReadWriteThrottleParams params;
+  utils::ReadWriteThrottleParams params;
   params.iopsTotal.limit = option.iopsTotalLimit;
   params.iopsRead.limit = option.iopsReadLimit;
   params.iopsWrite.limit = option.iopsWriteLimit;
@@ -177,7 +201,7 @@ void S3Adapter::Init(const S3AdapterOption& option) {
   params.bpsRead.limit = option.bpsReadMB * kMB;
   params.bpsWrite.limit = option.bpsWriteMB * kMB;
 
-  throttle_ = new Throttle();
+  throttle_ = new utils::Throttle();
   throttle_->UpdateThrottleParams(params);
 
   inflightBytesThrottle_ = std::make_unique<AsyncRequestInflightBytesThrottle>(
@@ -630,5 +654,5 @@ void S3Adapter::SetS3Option(const S3InfoOption& fs_s3_opt) {
   bucketName_ = fs_s3_opt.bucketName;
 }
 
-}  // namespace utils
+}  // namespace aws
 }  // namespace curvefs

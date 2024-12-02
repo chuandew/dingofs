@@ -40,14 +40,14 @@ ExternalProject_Add(libfiu
     INSTALL_COMMAND ${CMAKE_COMMAND} -E chdir <SOURCE_DIR> $(MAKE) PREFIX=${THIRD_PARTY_INSTALL_PATH} install
 )
 
+# the openssl libdir must be relative path, this is bug: https://github.com/openssl/openssl/issues/26096
 SET(OPENSSL_SOURCES_DIR ${CMAKE_CURRENT_SOURCE_DIR}/openssl)
 SET(OPENSSL_BINARY_DIR ${CMAKE_CURRENT_BINARY_DIR}/openssl/build)
 ExternalProject_Add(openssl
     PREFIX openssl
     SOURCE_DIR ${OPENSSL_SOURCES_DIR}
     BINARY_DIR ${OPENSSL_BINARY_DIR}
-    CONFIGURE_COMMAND sh ${OPENSSL_SOURCES_DIR}/config -DOPENSSL_NO_SCTP -DOPENSSL_NO_KTLS  -DOPENSSL_USE_NODELETE -DOPENSSL_PIC -no-shared --prefix=${THIRD_PARTY_INSTALL_PATH} --libdir=${THIRD_PARTY_INSTALL_PATH}/lib
-    BUILD_COMMAND $(MAKE)
+    CONFIGURE_COMMAND sh ${OPENSSL_SOURCES_DIR}/config -DOPENSSL_NO_SCTP -DOPENSSL_NO_KTLS  -DOPENSSL_USE_NODELETE -DOPENSSL_PIC -no-shared --prefix=${THIRD_PARTY_INSTALL_PATH} --libdir=lib BUILD_COMMAND $(MAKE)
     INSTALL_COMMAND ${CMAKE_COMMAND} -E chdir ${OPENSSL_BINARY_DIR} $(MAKE) install_sw
 )
 
@@ -324,11 +324,47 @@ ExternalProject_Add(curl
     DEPENDS zlib openssl
 )
 
+ExternalProject_Add(nlohmann-json
+    PREFIX nlohmann-json
+    SOURCE_DIR ${CMAKE_CURRENT_SOURCE_DIR}/nlohmann-json
+    CMAKE_ARGS 
+        -DCMAKE_PREFIX_PATH=${THIRD_PARTY_INSTALL_PATH}
+        -DJSON_BuildTests=OFF
+        -DJSON_MultipleHeaders=ON
+        -DJSON_Install=ON
+    CMAKE_CACHE_ARGS 
+        -DCMAKE_POSITION_INDEPENDENT_CODE:BOOL=ON
+        -DCMAKE_INSTALL_PREFIX:PATH=${THIRD_PARTY_INSTALL_PATH}
+        -DCMAKE_INSTALL_LIBDIR:PATH=${THIRD_PARTY_INSTALL_PATH}/lib
+)
+
+ExternalProject_Add(opentelemetry-cpp
+    PREFIX opentelemetry-cpp
+    SOURCE_DIR ${CMAKE_CURRENT_SOURCE_DIR}/opentelemetry-cpp
+    CMAKE_ARGS 
+        -DCMAKE_PREFIX_PATH=${THIRD_PARTY_INSTALL_PATH}
+        -DBUILD_SHARED_LIBS=OFF
+        -DWITH_OTLP_GRPC=OFF
+        -DWITH_OTLP_HTTP=ON
+        -DWITH_PROMETHEUS=OFF
+        -DBUILD_TESTING=OFF 
+        -DWITH_EXAMPLES=OFF
+        -DWITH_EXAMPLES_HTTP=OFF
+    CMAKE_CACHE_ARGS
+        -DOPENSSL_ROOT_DIR:PATH=${THIRD_PARTY_INSTALL_PATH}
+        -DProtobuf_DIR:PATH=${_FINDPACKAGE_PROTOBUF_CONFIG_DIR}
+        -DCMAKE_POSITION_INDEPENDENT_CODE:BOOL=TRUE
+        -DCMAKE_INSTALL_PREFIX:PATH=${THIRD_PARTY_INSTALL_PATH}
+        -DCMAKE_INSTALL_LIBDIR:PATH=${THIRD_PARTY_INSTALL_PATH}/lib
+    DEPENDS curl protobuf openssl nlohmann-json
+)
+
 ExternalProject_Add(aws-sdk-cpp
     PREFIX aws-sdk-cpp
     SOURCE_DIR ${CMAKE_CURRENT_SOURCE_DIR}/aws-sdk-cpp
     CMAKE_ARGS
         -DCMAKE_PREFIX_PATH=${THIRD_PARTY_INSTALL_PATH}
+        -DBUILD_OPTEL=ON
         -DBUILD_SHARED_LIBS=OFF
         -DENABLE_TESTING=OFF
         -DAUTORUN_UNIT_TESTS=OFF
@@ -337,7 +373,7 @@ ExternalProject_Add(aws-sdk-cpp
         -DCMAKE_POSITION_INDEPENDENT_CODE:BOOL=TRUE
         -DCMAKE_INSTALL_PREFIX:PATH=${THIRD_PARTY_INSTALL_PATH}
         -DCMAKE_INSTALL_LIBDIR:PATH=${THIRD_PARTY_INSTALL_PATH}/lib
-    DEPENDS curl zlib openssl
+    DEPENDS curl zlib openssl nlohmann-json opentelemetry-cpp
 )
 
 ExternalProject_Add(libuuid
@@ -352,3 +388,4 @@ ExternalProject_Add(libuuid
         -DCMAKE_INSTALL_PREFIX:PATH=${THIRD_PARTY_INSTALL_PATH}
         -DCMAKE_INSTALL_LIBDIR:PATH=${THIRD_PARTY_INSTALL_PATH}/lib
 )
+
