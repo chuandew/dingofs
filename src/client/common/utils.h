@@ -28,6 +28,19 @@ static std::string Char2Addr(const char* p) {
   return oss.str();
 }
 
+static std::string StringToHex(const std::string& str) {
+  static const char hex_chars[] = "0123456789abcdef";
+  std::string result;
+  result.reserve(str.size() * 2);
+
+  for (unsigned char c : str) {
+    result += hex_chars[c >> 4];
+    result += hex_chars[c & 0x0F];
+  }
+
+  return result;
+}
+
 }  // namespace client
 }  // namespace dingofs
 

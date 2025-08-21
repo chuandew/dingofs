@@ -39,6 +39,13 @@ Status FileWriter::Write(const char* buf, uint64_t size, uint64_t offset,
   VLOG(3) << "File::Write, ino: " << ino_ << ", buf: " << Char2Addr(buf)
           << ", size: " << size << ", offset: " << offset
           << ", chunk_size: " << chunk_size;
+  if (size > 32) {
+    VLOG(3) << "File::Write, ino: " << ino_ << ", buf: " << Char2Addr(buf)
+            << ", size: " << size << ", offset: " << offset
+            << ", chunk_size: " << chunk_size
+            << ", content: " << StringToHex(std::string(buf, 16)) << " "
+            << StringToHex(std::string(buf + 16, 16));
+  }
 
   const char* pos = buf;
 
