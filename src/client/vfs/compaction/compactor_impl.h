@@ -14,11 +14,12 @@
  * limitations under the License.
  */
 
-#ifndef DINGODB_CLIENT_VFS_COMPACTION_COMPACTOR_H_
-#define DINGODB_CLIENT_VFS_COMPACTION_COMPACTOR_H_
+#ifndef DINGODB_CLIENT_VFS_COMPACTION_COMPACTOR_IMPL_H_
+#define DINGODB_CLIENT_VFS_COMPACTION_COMPACTOR_IMPL_H_
 
 #include <cstdint>
 
+#include "client/vfs/compaction/compactor.h"
 #include "client/vfs/vfs_meta.h"
 #include "common/status.h"
 #include "common/trace/context.h"
@@ -27,17 +28,25 @@ namespace dingofs {
 namespace client {
 namespace vfs {
 
-class Compactor {
- public:
-  virtual ~Compactor() = default;
+class VFSHub;
 
-  virtual Status Compact(ContextSPtr ctx, Ino ino, uint64_t chunk_index,
-                         const std::vector<Slice>& slices,
-                         std::vector<Slice>& out_slices) = 0;
+class CompactorImpl : public Compactor {
+ public:
+  explicit CompactorImpl(VFSHub* hub) : vfs_hub_(hub) {}
+
+  ~CompactorImpl() override = default;
+
+  Status Compact(ContextSPtr ctx, Ino ino, uint64_t chunk_index,
+                 const std::vector<Slice>& slices,
+                 std::vector<Slice>& out_slices) override;
+
+ private:
+
+  VFSHub* vfs_hub_;
 };
 
 }  // namespace vfs
 }  // namespace client
 }  // namespace dingofs
 
-#endif  // DINGODB_CLIENT_VFS_COMPACTION_COMPACTOR_H_
+#endif  // DINGODB_CLIENT_VFS_COMPACTION_COMPACTOR_IMPL_H_

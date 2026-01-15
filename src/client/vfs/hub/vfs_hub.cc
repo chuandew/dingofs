@@ -22,6 +22,7 @@
 #include "client/vfs/blockstore/block_store_impl.h"
 #include "client/vfs/blockstore/fake_block_store.h"
 #include "client/vfs/common/helper.h"
+#include "client/vfs/compaction/compactor_impl.h"
 #include "client/vfs/components/prefetch_manager.h"
 #include "client/vfs/components/warmup_manager.h"
 #include "client/vfs/metasystem/local/metasystem.h"
@@ -253,7 +254,7 @@ Status VFSHubImpl::Start(const VFSConfig& vfs_conf, bool upgrade) {
     DINGOFS_RETURN_NOT_OK(warmup_manager_->Start(FLAGS_vfs_warmup_threads));
   }
 
-  compactor_ = std::make_unique<Compactor>(this);
+  compactor_ = std::make_unique<CompactorImpl>(this);
 
   started_.store(true, std::memory_order_relaxed);
 

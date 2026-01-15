@@ -14,7 +14,7 @@
  * limitations under the License.
  */
 
-#include "client/vfs/compaction/compactor.h"
+#include "client/vfs/compaction/compactor_impl.h"
 
 #include <glog/logging.h>
 
@@ -27,18 +27,27 @@
 #include "client/vfs/data/slice/common.h"
 #include "client/vfs/data/slice/slice_writer.h"
 #include "client/vfs/hub/vfs_hub.h"
+#include "client/vfs/data/common/data_utils.h"
 
 namespace dingofs {
 namespace client {
 namespace vfs {
 
+int32_t Skip(const std::vector<Slice>& slices) {
+  VLOG(12) << "Skip compact for slices count: " << slices.size();
+
+  std::vector<SliceReadReq> reqs = 
+
+}
+
 // TODO: delete compact object after fail
-Status Compactor::Compact(ContextSPtr ctx, Ino ino, uint64_t chunk_index,
-                          const std::vector<Slice>& slices,
-                          std::vector<Slice>& out_slices) {
+Status CompactorImpl::Compact(ContextSPtr ctx, Ino ino, uint64_t chunk_index,
+                              const std::vector<Slice>& slices,
+                              std::vector<Slice>& out_slices) {
   CHECK(!slices.empty()) << "invalid compact, no slices to compact";
-  auto span = vfs_hub_->GetTraceManager().StartChildSpan("Compactor::Compact",
-                                                         ctx->GetTraceSpan());
+  auto span = vfs_hub_->GetTraceManager().StartChildSpan(
+      "CompactorImpl::Compact", ctx->GetTraceSpan());
+
   auto fs_info = vfs_hub_->GetFsInfo();
 
   int64_t chunk_size = fs_info.chunk_size;
