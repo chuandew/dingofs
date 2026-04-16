@@ -78,7 +78,9 @@ DEFINE_int32(bench_file_size_mb, 1024, "File size per thread in MB");
 DEFINE_int32(bench_block_size_kb, 4096, "Write block size in KB (default 4MB)");
 
 DEFINE_bool(bench_fake_blockstore, false,
-            "Use FakeBlockStore to bypass real I/O");
+            "Use FakeBlockStore to bypass BlockStore+Cache+IO entirely");
+DEFINE_bool(bench_fake_access, false,
+            "Use FakeAccesser to bypass IO only, keep TierBlockCache path");
 DEFINE_bool(bench_cleanup, true, "Remove bench files after completion");
 DEFINE_bool(bench_fsync, false, "Call fsync after each file write");
 DEFINE_bool(bench_flush, true, "Call flush after each file write");
@@ -332,6 +334,8 @@ int main(int argc, char* argv[]) {
             << std::endl;
   std::cout << "  fake_blockstore:"
             << (FLAGS_bench_fake_blockstore ? " yes" : " no") << std::endl;
+  std::cout << "  fake_access:    " << (FLAGS_bench_fake_access ? "yes" : "no")
+            << std::endl;
   std::cout << "  flush:          " << (FLAGS_bench_flush ? "yes" : "no")
             << std::endl;
   std::cout << "  fsync:          " << (FLAGS_bench_fsync ? "yes" : "no")
@@ -359,10 +363,16 @@ int main(int argc, char* argv[]) {
     }
   }
 
-  // FakeBlockStore
+  // FakeBlockStore (skip BlockStore + Cache + IO entirely)
   if (FLAGS_bench_fake_blockstore) {
     dingofs_conf_set(h, "vfs_use_fake_block_store", "true");
     std::cout << "FakeBlockStore: enabled" << std::endl;
+  }
+
+  // FakeAccesser (skip IO only, keep TierBlockCache path)
+  if (FLAGS_bench_fake_access) {
+    dingofs_conf_set(h, "use_fake_block_access", "true");
+    std::cout << "FakeAccesser: enabled" << std::endl;
   }
 
   // Mount
