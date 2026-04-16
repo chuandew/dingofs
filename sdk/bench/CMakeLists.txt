@@ -31,3 +31,19 @@ target_link_libraries(write_bench
         gflags::gflags
         glog::glog
 )
+
+add_executable(read_bench
+    read_bench.cc
+)
+
+target_include_directories(read_bench
+    PRIVATE
+        ${PROJECT_SOURCE_DIR}/sdk
+)
+
+target_link_libraries(read_bench
+    PRIVATE
+        dingofs_c
+        gflags::gflags
+        glog::glog
+)
