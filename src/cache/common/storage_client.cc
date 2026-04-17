@@ -49,6 +49,11 @@ DEFINE_validator(storage_download_retry_timeout_s, brpc::PassValidate);
 DEFINE_uint64(storage_upload_thread_pool_size, 4,
               "thread pool size for upload tasks");
 
+DEFINE_bool(storage_client_bench_sync_put, false,
+            "[bench] run PutBlockTask inline in StorageClient::Put instead of "
+            "dispatching to the upload thread_pool. Isolates thread_pool "
+            "dispatch overhead. Only valid with fake accesser.");
+
 static int64_t GetQueueSize(void* meta) {
   iutil::TaskExecutionQueue* queue =
       static_cast<iutil::TaskExecutionQueue*>(meta);
@@ -259,15 +264,19 @@ Status StorageClient::Put(ContextSPtr ctx, const BlockKey& key,
                           const Block* block) {
   auto task =
       PutBlockTask(ctx, key, block, block_accesser_, upload_retry_queue_);
-  // CHECK_EQ(0, bthread::execution_queue_execute(queue_id_, &task));
-  pending_async_put_ << 1;
-  thread_pool_->Enqueue([&task, this]() mutable {
-    pending_async_put_ << -1;
-
-    num_async_put_ << 1;
+  if (FLAGS_storage_client_bench_sync_put) {
     task.Run();
-    num_async_put_ << -1;
-  });
+  } else {
+    // CHECK_EQ(0, bthread::execution_queue_execute(queue_id_, &task));
+    pending_async_put_ << 1;
+    thread_pool_->Enqueue([&task, this]() mutable {
+      pending_async_put_ << -1;
+
+      num_async_put_ << 1;
+      task.Run();
+      num_async_put_ << -1;
+    });
+  }
 
   task.Wait();
   auto status = task.status();

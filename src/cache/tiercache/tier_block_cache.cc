@@ -51,6 +51,18 @@ DEFINE_validator(fill_group_cache, brpc::PassValidate);
 DEFINE_uint32(prefetch_max_inflights, 16,
               "maximum inflight requests for prefetching blocks");
 
+DEFINE_bool(tier_block_cache_bench_skip_copyblock, false,
+            "[bench] make TierBlockCache::CopyBlock reuse a shared static 4MB "
+            "buffer instead of `new char[block.size]`; still memcpy's into a "
+            "single contiguous block (required by PutBlockTask). Isolates the "
+            "per-Put heap alloc / page-fault cost (the `FIXME: independent "
+            "copy thread pool` marker). RACES on the shared buffer — bench "
+            "only, data integrity broken.");
+
+static constexpr size_t kBenchCopyBufferSize = 4 * 1024 * 1024;  // 4MB
+static char kBenchCopyBuffer[kBenchCopyBufferSize];
+static void BenchCopyNoopDeleter(void*) {}
+
 TierBlockCache::TierBlockCache(StorageClientUPtr storage_client)
     : running_(false),
       storage_client_(std::move(storage_client)),
@@ -384,9 +396,18 @@ void TierBlockCache::AsyncPrefetch(ContextSPtr ctx,
 
 Block TierBlockCache::CopyBlock(const Block& block) {
   IOBuffer buffer;
-  char* data = new char[block.size];
-  block.buffer.CopyTo(data);
-  buffer.AppendUserData(data, block.size, iutil::DeleteBuffer);
+  if (FLAGS_tier_block_cache_bench_skip_copyblock &&
+      block.size <= kBenchCopyBufferSize) {
+    // bench-only: skip heap alloc + page faults; still memcpy to satisfy
+    // PutBlockTask::OnPrepare's single-contiguous-block requirement. Data
+    // integrity is broken under concurrency — do not use in production.
+    block.buffer.CopyTo(kBenchCopyBuffer);
+    buffer.AppendUserData(kBenchCopyBuffer, block.size, BenchCopyNoopDeleter);
+  } else {
+    char* data = new char[block.size];
+    block.buffer.CopyTo(data);
+    buffer.AppendUserData(data, block.size, iutil::DeleteBuffer);
+  }
   return Block(std::move(buffer));
 }
 

@@ -17,6 +17,7 @@
 #include "common/blockaccess/fake/fake_accesser.h"
 
 #include <fcntl.h>
+#include <gflags/gflags.h>
 #include <glog/logging.h>
 #include <sys/stat.h>
 #include <sys/types.h>
@@ -28,6 +29,11 @@
 #include <cstdio>
 #include <cstring>
 #include <thread>
+
+DEFINE_bool(fake_accesser_sync_async, false,
+            "[bench] run FakeAccesser AsyncGet/AsyncPut inline in caller "
+            "thread instead of spawning a std::thread; isolates thread-create "
+            "overhead on the hot read/write path.");
 
 namespace dingofs {
 namespace blockaccess {
@@ -69,6 +75,10 @@ void FakeAccesser::DoAsyncPut(PutObjectAsyncContextSPtr context) {
 }
 
 void FakeAccesser::AsyncPut(PutObjectAsyncContextSPtr context) {
+  if (FLAGS_fake_accesser_sync_async) {
+    DoAsyncPut(context);
+    return;
+  }
   std::thread([&, context]() { DoAsyncPut(context); }).detach();
 }
 
@@ -105,6 +115,10 @@ void FakeAccesser::DoAsyncGet(GetObjectAsyncContextSPtr context) {
 }
 
 void FakeAccesser::AsyncGet(GetObjectAsyncContextSPtr context) {
+  if (FLAGS_fake_accesser_sync_async) {
+    DoAsyncGet(context);
+    return;
+  }
   std::thread([&, context]() { DoAsyncGet(context); }).detach();
 }
 
