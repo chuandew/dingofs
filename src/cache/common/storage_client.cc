@@ -49,6 +49,20 @@ DEFINE_validator(storage_download_retry_timeout_s, brpc::PassValidate);
 DEFINE_uint64(storage_upload_thread_pool_size, 4,
               "thread pool size for upload tasks");
 
+DEFINE_bool(storage_client_bench_reuse_buffer, false,
+            "[bench] reuse a static 4MB buffer in RangeBlockTask::OnPrepare "
+            "instead of `new char[length]`; isolates per-Range heap alloc "
+            "overhead.");
+
+DEFINE_bool(storage_client_bench_sync_range, false,
+            "[bench] run RangeBlockTask synchronously in StorageClient::Range "
+            "instead of dispatching via execution_queue; isolates bthread "
+            "dispatch overhead. Only valid with fake accesser.");
+
+static constexpr size_t kBenchSharedBufferSize = 4 * 1024 * 1024;  // 4MB
+static char kBenchSharedBuffer[kBenchSharedBufferSize];
+static void BenchNoopDeleter(void*) {}
+
 static int64_t GetQueueSize(void* meta) {
   iutil::TaskExecutionQueue* queue =
       static_cast<iutil::TaskExecutionQueue*>(meta);
@@ -133,8 +147,13 @@ void RangeBlockTask::Run() {
 }
 
 blockaccess::GetObjectAsyncContextSPtr RangeBlockTask::OnPrepare() {
-  char* data = new char[length_];
-  buffer_->AppendUserData(data, length_, iutil::DeleteBuffer);
+  if (FLAGS_storage_client_bench_reuse_buffer &&
+      length_ <= kBenchSharedBufferSize) {
+    buffer_->AppendUserData(kBenchSharedBuffer, length_, BenchNoopDeleter);
+  } else {
+    char* data = new char[length_];
+    buffer_->AppendUserData(data, length_, iutil::DeleteBuffer);
+  }
 
   auto ctx = std::make_shared<blockaccess::GetObjectAsyncContext>();
   ctx->start_time = butil::gettimeofday_us();
@@ -281,7 +300,11 @@ Status StorageClient::Range(ContextSPtr ctx, const BlockKey& key, off_t offset,
                             size_t length, IOBuffer* buffer) {
   auto task = RangeBlockTask(ctx, key, offset, length, buffer, block_accesser_,
                              download_retry_queue_);
-  CHECK_EQ(0, bthread::execution_queue_execute(queue_id_, &task));
+  if (FLAGS_storage_client_bench_sync_range) {
+    task.Run();
+  } else {
+    CHECK_EQ(0, bthread::execution_queue_execute(queue_id_, &task));
+  }
 
   task.Wait();
   auto status = task.status();

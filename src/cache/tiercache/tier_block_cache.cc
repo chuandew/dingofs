@@ -51,6 +51,11 @@ DEFINE_validator(fill_group_cache, brpc::PassValidate);
 DEFINE_uint32(prefetch_max_inflights, 16,
               "maximum inflight requests for prefetching blocks");
 
+DEFINE_bool(tier_block_cache_bench_skip_cache, false,
+            "[bench] skip local/remote cache fallback in "
+            "TierBlockCache::Range; go directly to storage_client. Isolates "
+            "multi-layer cache-fallback overhead.");
+
 TierBlockCache::TierBlockCache(StorageClientUPtr storage_client)
     : running_(false),
       storage_client_(std::move(storage_client)),
@@ -187,6 +192,10 @@ Status TierBlockCache::Range(ContextSPtr ctx, const BlockContext& block_ctx,
                              off_t offset, size_t length, IOBuffer* buffer,
                              RangeOption option) {
   DCHECK_RUNNING("TierBlockCache");
+
+  if (FLAGS_tier_block_cache_bench_skip_cache) {
+    return storage_client_->Range(ctx, block_ctx.key, offset, length, buffer);
+  }
 
   Status status = Status::NotFound("no cache layer found");
 
