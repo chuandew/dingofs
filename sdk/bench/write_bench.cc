@@ -72,6 +72,8 @@ DEFINE_string(bench_fs_name, "", "Filesystem name");
 DEFINE_string(bench_mount_point, "/bench_mount", "Logical mount point label");
 DEFINE_string(bench_conf, "", "Config file path (gflags format)");
 DEFINE_string(bench_dir, "/bench", "Directory inside FS for bench files");
+DEFINE_int32(bench_dummy_port, 0,
+             "Override vfs_dummy_server_port (0 = use default 10000)");
 
 DEFINE_int32(bench_threads, 1, "Number of concurrent writer threads");
 DEFINE_int32(bench_file_size_mb, 1024, "File size per thread in MB");
@@ -109,7 +111,7 @@ static std::string HumanSize(size_t bytes) {
     idx++;
   }
   char buf[64];
-  snprintf(buf, sizeof(buf), "%.1f %s", val, units[idx]);
+  (void)snprintf(buf, sizeof(buf), "%.1f %s", val, units[idx]);
   return buf;
 }
 
@@ -197,15 +199,15 @@ static void WriterThread(uintptr_t handle, int thread_id, size_t file_size,
   // Per-thread subdirectory (pre-created by main thread to avoid MDS
   // TxnWriteConflict on concurrent mkdir under the same parent).
   char dir[512];
-  snprintf(dir, sizeof(dir), "%s/%d", FLAGS_bench_dir.c_str(), thread_id);
+  (void)snprintf(dir, sizeof(dir), "%s/%d", FLAGS_bench_dir.c_str(), thread_id);
 
   char path[512];
-  snprintf(path, sizeof(path), "%s/data", dir);
+  (void)snprintf(path, sizeof(path), "%s/data", dir);
 
   // Open file (O_WRONLY | O_CREAT | O_TRUNC)
   int fd = dingofs_open(handle, path, O_WRONLY | O_CREAT | O_TRUNC, 0644);
   if (fd < 0) {
-    std::cerr << "thread " << thread_id << ": open failed: " << fd << std::endl;
+    std::cerr << "thread " << thread_id << ": open failed: " << fd << "\n";
     result->error_code = fd;
     return;
   }
@@ -222,7 +224,7 @@ static void WriterThread(uintptr_t handle, int thread_id, size_t file_size,
     ssize_t n = dingofs_pwrite(handle, fd, buf.data(), to_write, written);
     if (n < 0) {
       std::cerr << "thread " << thread_id << ": write failed at offset "
-                << written << ": " << n << std::endl;
+                << written << ": " << n << "\n";
       result->error_code = static_cast<int>(n);
       break;
     }
@@ -321,29 +323,29 @@ int main(int argc, char* argv[]) {
   int nthreads = FLAGS_bench_threads;
 
   // Print banner
-  std::cout << "DingoFS Write Benchmark (bypass FUSE)" << std::endl;
-  std::cout << "  mds_addr:       " << FLAGS_bench_mds_addr << std::endl;
-  std::cout << "  fs_name:        " << FLAGS_bench_fs_name << std::endl;
-  std::cout << "  threads:        " << nthreads << std::endl;
+  std::cout << "DingoFS Write Benchmark (bypass FUSE)"
+            << "\n";
+  std::cout << "  mds_addr:       " << FLAGS_bench_mds_addr << "\n";
+  std::cout << "  fs_name:        " << FLAGS_bench_fs_name << "\n";
+  std::cout << "  threads:        " << nthreads << "\n";
   std::cout << "  file_size:      " << FLAGS_bench_file_size_mb << " MB"
-            << std::endl;
+            << "\n";
   std::cout << "  block_size:     " << FLAGS_bench_block_size_kb << " KB"
-            << std::endl;
+            << "\n";
   std::cout << "  total_write:    "
-            << HumanSize(static_cast<size_t>(nthreads) * file_size)
-            << std::endl;
+            << HumanSize(static_cast<size_t>(nthreads) * file_size) << "\n";
   std::cout << "  fake_blockstore:"
-            << (FLAGS_bench_fake_blockstore ? " yes" : " no") << std::endl;
+            << (FLAGS_bench_fake_blockstore ? " yes" : " no") << "\n";
   std::cout << "  fake_access:    " << (FLAGS_bench_fake_access ? "yes" : "no")
-            << std::endl;
+            << "\n";
   std::cout << "  flush:          " << (FLAGS_bench_flush ? "yes" : "no")
-            << std::endl;
+            << "\n";
   std::cout << "  fsync:          " << (FLAGS_bench_fsync ? "yes" : "no")
-            << std::endl;
+            << "\n";
   if (!FLAGS_bench_conf.empty()) {
-    std::cout << "  conf:           " << FLAGS_bench_conf << std::endl;
+    std::cout << "  conf:           " << FLAGS_bench_conf << "\n";
   }
-  std::cout << std::endl;
+  std::cout << "\n";
 
   // Create and configure instance
   uintptr_t h = dingofs_new();
@@ -357,32 +359,41 @@ int main(int argc, char* argv[]) {
     int rc = dingofs_conf_load(h, FLAGS_bench_conf.c_str());
     if (rc != 0) {
       std::cerr << "Failed to load config " << FLAGS_bench_conf << ": " << rc
-                << std::endl;
+                << "\n";
       dingofs_delete(h);
       return 1;
     }
   }
 
+  // Dummy server port (avoid conflict with FUSE client on same machine)
+  if (FLAGS_bench_dummy_port > 0) {
+    dingofs_conf_set(h, "vfs_dummy_server_port",
+                     std::to_string(FLAGS_bench_dummy_port).c_str());
+  }
+
   // FakeBlockStore (skip BlockStore + Cache + IO entirely)
   if (FLAGS_bench_fake_blockstore) {
     dingofs_conf_set(h, "vfs_use_fake_block_store", "true");
-    std::cout << "FakeBlockStore: enabled" << std::endl;
+    std::cout << "FakeBlockStore: enabled"
+              << "\n";
   }
 
   // FakeAccesser (skip IO only, keep TierBlockCache path)
   if (FLAGS_bench_fake_access) {
     dingofs_conf_set(h, "use_fake_block_access", "true");
-    std::cout << "FakeAccesser: enabled" << std::endl;
+    std::cout << "FakeAccesser: enabled"
+              << "\n";
   }
 
   // Mount
   std::cout << "Mounting " << FLAGS_bench_mds_addr << "/" << FLAGS_bench_fs_name
-            << " ..." << std::endl;
+            << " ..."
+            << "\n";
   int rc = dingofs_mount(h, FLAGS_bench_mds_addr.c_str(),
                          FLAGS_bench_fs_name.c_str(),
                          FLAGS_bench_mount_point.c_str());
   if (rc != 0) {
-    std::cerr << "Mount failed: " << rc << std::endl;
+    std::cerr << "Mount failed: " << rc << "\n";
     dingofs_delete(h);
     return 1;
   }
@@ -392,7 +403,7 @@ int main(int argc, char* argv[]) {
   dingofs_mkdir(h, FLAGS_bench_dir.c_str(), 0755);
   for (int i = 0; i < nthreads; i++) {
     char dir[512];
-    snprintf(dir, sizeof(dir), "%s/%d", FLAGS_bench_dir.c_str(), i);
+    (void)snprintf(dir, sizeof(dir), "%s/%d", FLAGS_bench_dir.c_str(), i);
     dingofs_mkdir(h, dir, 0755);
   }
 
@@ -438,13 +449,14 @@ int main(int argc, char* argv[]) {
     total_data_mb += r.bytes_written / (1024.0 * 1024.0);
   }
 
-  std::cout << std::endl;
-  std::cout << "=== Results ===" << std::endl;
+  std::cout << "\n";
+  std::cout << "=== Results ==="
+            << "\n";
   std::cout << std::left << std::setw(10) << "Thread" << std::right
             << std::setw(12) << "Written" << std::setw(12) << "Elapsed"
             << std::setw(14) << "Throughput" << std::setw(8) << "Status"
-            << std::endl;
-  std::cout << std::string(56, '-') << std::endl;
+            << "\n";
+  std::cout << std::string(56, '-') << "\n";
 
   for (const auto& r : results) {
     std::cout << std::left << std::setw(10) << r.thread_id << std::right
@@ -453,14 +465,15 @@ int main(int argc, char* argv[]) {
               << std::setw(9) << std::fixed << std::setprecision(2)
               << r.elapsed_sec << " s" << std::setw(10) << std::setprecision(1)
               << r.throughput_mbs << " MB/s" << std::setw(8)
-              << (r.error_code == 0 ? "  OK" : "  FAIL") << std::endl;
+              << (r.error_code == 0 ? "  OK" : "  FAIL") << "\n";
   }
 
-  std::cout << std::string(56, '-') << std::endl;
+  std::cout << std::string(56, '-') << "\n";
   std::cout << "Aggregate: " << std::fixed << std::setprecision(1)
             << total_data_mb << " MB in " << std::setprecision(2) << wall_sec
             << " s = " << std::setprecision(1) << total_data_mb / wall_sec
-            << " MB/s" << std::endl;
+            << " MB/s"
+            << "\n";
 
   // Cleanup bench directory if empty
   if (FLAGS_bench_cleanup) {

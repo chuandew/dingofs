@@ -73,10 +73,19 @@ DEFINE_string(bench_dir, "/read_bench", "Directory inside FS for bench files");
 DEFINE_int32(bench_threads, 1, "Number of concurrent reader threads");
 DEFINE_int32(bench_file_size_mb, 1024, "File size per thread in MB");
 DEFINE_int32(bench_block_size_kb, 4096, "Read block size in KB (default 4MB)");
+DEFINE_int32(bench_dummy_port, 0,
+             "Override vfs_dummy_server_port (0 = use default 10000)");
 
+DEFINE_string(bench_op, "all",
+              "Operation: prefill|read|all. "
+              "prefill=write only; read=read only (data must exist); "
+              "all=prefill then read (default)");
 DEFINE_string(bench_pattern, "sequential", "Read pattern: sequential|random");
-DEFINE_bool(bench_skip_prefill, false,
-            "Skip prefill phase (data must already exist)");
+DEFINE_int32(bench_read_rounds, 1,
+             "Number of read rounds after prefill (each round uses same "
+             "data; take median across rounds)");
+DEFINE_bool(bench_skip_first_round, false,
+            "Discard first round (warmup); effective when bench_read_rounds>1");
 DEFINE_int32(bench_prefill_settle_sec, 0,
              "Sleep N seconds after prefill before reading (let cache settle)");
 
@@ -113,7 +122,7 @@ static std::string HumanSize(size_t bytes) {
     idx++;
   }
   char buf[64];
-  snprintf(buf, sizeof(buf), "%.1f %s", val, units[idx]);
+  (void)snprintf(buf, sizeof(buf), "%.1f %s", val, units[idx]);
   return buf;
 }
 
@@ -197,13 +206,13 @@ static void PrefillThread(uintptr_t handle, int thread_id, size_t file_size,
   *error_code = 0;
 
   char path[512];
-  snprintf(path, sizeof(path), "%s/%d/data", FLAGS_bench_dir.c_str(),
-           thread_id);
+  (void)snprintf(path, sizeof(path), "%s/%d/data", FLAGS_bench_dir.c_str(),
+                 thread_id);
 
   int fd = dingofs_open(handle, path, O_WRONLY | O_CREAT | O_TRUNC, 0644);
   if (fd < 0) {
     std::cerr << "prefill thread " << thread_id << ": open failed: " << fd
-              << std::endl;
+              << "\n";
     *error_code = fd;
     return;
   }
@@ -242,14 +251,14 @@ static void ReaderThread(uintptr_t handle, int thread_id, size_t file_size,
   result->error_code = 0;
 
   char path[512];
-  snprintf(path, sizeof(path), "%s/%d/data", FLAGS_bench_dir.c_str(),
-           thread_id);
+  (void)snprintf(path, sizeof(path), "%s/%d/data", FLAGS_bench_dir.c_str(),
+                 thread_id);
 
   // O_RDONLY is 0 which MDS rejects as "flags is empty"; add O_NOATIME
   // (0x40000)
   int fd = dingofs_open(handle, path, O_RDONLY | O_NOATIME, 0);
   if (fd < 0) {
-    std::cerr << "thread " << thread_id << ": open failed: " << fd << std::endl;
+    std::cerr << "thread " << thread_id << ": open failed: " << fd << "\n";
     result->error_code = fd;
     return;
   }
@@ -275,7 +284,7 @@ static void ReaderThread(uintptr_t handle, int thread_id, size_t file_size,
     ssize_t n = dingofs_pread(handle, fd, buf.data(), to_read, off);
     if (n < 0) {
       std::cerr << "thread " << thread_id << ": read failed at offset " << off
-                << ": " << n << std::endl;
+                << ": " << n << "\n";
       result->error_code = static_cast<int>(n);
       break;
     }
@@ -313,7 +322,8 @@ Options:
   --bench_file_size_mb=N  File size per thread in MB (default: 1024)
   --bench_block_size_kb=N Read block size in KB (default: 4096 = 4MB)
   --bench_pattern=P       sequential | random  (default: sequential)
-  --bench_skip_prefill    Skip prefill phase (data must already exist)
+  --bench_read_rounds=N   Number of read rounds after prefill (default: 1)
+  --bench_skip_first_round Discard first round as warmup (needs rounds>1)
   --bench_prefill_settle_sec=N  Sleep after prefill (default: 0)
   --bench_dir=PATH        FS directory for bench files (default: /read_bench)
   --bench_fake_blockstore Bypass BlockStore + Cache + IO entirely
@@ -341,7 +351,17 @@ int main(int argc, char* argv[]) {
   bool random_pattern = (FLAGS_bench_pattern == "random");
   if (FLAGS_bench_pattern != "sequential" && FLAGS_bench_pattern != "random") {
     std::cerr << "Invalid --bench_pattern: " << FLAGS_bench_pattern
-              << " (must be sequential|random)" << std::endl;
+              << " (must be sequential|random)"
+              << "\n";
+    return 1;
+  }
+
+  bool do_prefill = (FLAGS_bench_op == "all" || FLAGS_bench_op == "prefill");
+  bool do_read = (FLAGS_bench_op == "all" || FLAGS_bench_op == "read");
+  if (!do_prefill && !do_read) {
+    std::cerr << "Invalid --bench_op: " << FLAGS_bench_op
+              << " (must be prefill|read|all)"
+              << "\n";
     return 1;
   }
 
@@ -350,29 +370,33 @@ int main(int argc, char* argv[]) {
   size_t block_size = static_cast<size_t>(FLAGS_bench_block_size_kb) * 1024;
   int nthreads = FLAGS_bench_threads;
 
-  std::cout << "DingoFS Read Benchmark (bypass FUSE)" << std::endl;
-  std::cout << "  mds_addr:       " << FLAGS_bench_mds_addr << std::endl;
-  std::cout << "  fs_name:        " << FLAGS_bench_fs_name << std::endl;
-  std::cout << "  threads:        " << nthreads << std::endl;
+  std::cout << "DingoFS Read Benchmark (bypass FUSE)"
+            << "\n";
+  std::cout << "  mds_addr:       " << FLAGS_bench_mds_addr << "\n";
+  std::cout << "  fs_name:        " << FLAGS_bench_fs_name << "\n";
+  std::cout << "  threads:        " << nthreads << "\n";
   std::cout << "  file_size:      " << FLAGS_bench_file_size_mb << " MB"
-            << std::endl;
+            << "\n";
   std::cout << "  block_size:     " << FLAGS_bench_block_size_kb << " KB"
-            << std::endl;
-  std::cout << "  pattern:        " << FLAGS_bench_pattern << std::endl;
+            << "\n";
+  std::cout << "  op:             " << FLAGS_bench_op << "\n";
+  std::cout << "  pattern:        " << FLAGS_bench_pattern << "\n";
   std::cout << "  total_read:     "
-            << HumanSize(static_cast<size_t>(nthreads) * file_size)
-            << std::endl;
+            << HumanSize(static_cast<size_t>(nthreads) * file_size) << "\n";
   std::cout << "  fake_blockstore:"
-            << (FLAGS_bench_fake_blockstore ? " yes" : " no") << std::endl;
+            << (FLAGS_bench_fake_blockstore ? " yes" : " no") << "\n";
   std::cout << "  fake_access:    " << (FLAGS_bench_fake_access ? "yes" : "no")
-            << std::endl;
-  std::cout << "  skip_prefill:   " << (FLAGS_bench_skip_prefill ? "yes" : "no")
-            << std::endl;
+            << "\n";
+  std::cout << "  read_rounds:    " << FLAGS_bench_read_rounds;
+  if (FLAGS_bench_read_rounds > 1 && FLAGS_bench_skip_first_round) {
+    std::cout << " (first is warmup, discarded)";
+  }
+  std::cout << "\n";
   if (FLAGS_bench_prefill_settle_sec > 0) {
     std::cout << "  settle:         " << FLAGS_bench_prefill_settle_sec << " s"
-              << std::endl;
+              << "\n";
   }
-  std::cout << std::endl;
+  std::cout << "\n";
 
   uintptr_t h = dingofs_new();
   dingofs_conf_set(h, "log.dir", FLAGS_bench_log_dir.c_str());
@@ -382,52 +406,63 @@ int main(int argc, char* argv[]) {
     int rc = dingofs_conf_load(h, FLAGS_bench_conf.c_str());
     if (rc != 0) {
       std::cerr << "Failed to load config " << FLAGS_bench_conf << ": " << rc
-                << std::endl;
+                << "\n";
       dingofs_delete(h);
       return 1;
     }
   }
 
+  if (FLAGS_bench_dummy_port > 0) {
+    dingofs_conf_set(h, "vfs_dummy_server_port",
+                     std::to_string(FLAGS_bench_dummy_port).c_str());
+  }
+
   if (FLAGS_bench_fake_blockstore) {
     dingofs_conf_set(h, "vfs_use_fake_block_store", "true");
-    std::cout << "FakeBlockStore: enabled" << std::endl;
+    std::cout << "FakeBlockStore: enabled"
+              << "\n";
   }
   if (FLAGS_bench_fake_access) {
     dingofs_conf_set(h, "use_fake_block_access", "true");
-    std::cout << "FakeAccesser: enabled" << std::endl;
+    std::cout << "FakeAccesser: enabled"
+              << "\n";
   }
   if (FLAGS_bench_read_buffer_mb > 0) {
     dingofs_conf_set(h, "vfs_read_buffer_total_mb",
                      std::to_string(FLAGS_bench_read_buffer_mb).c_str());
     std::cout << "Read buffer total: " << FLAGS_bench_read_buffer_mb << " MB"
-              << std::endl;
+              << "\n";
   }
 
   std::cout << "Mounting " << FLAGS_bench_mds_addr << "/" << FLAGS_bench_fs_name
-            << " ..." << std::endl;
+            << " ..."
+            << "\n";
   int rc = dingofs_mount(h, FLAGS_bench_mds_addr.c_str(),
                          FLAGS_bench_fs_name.c_str(),
                          FLAGS_bench_mount_point.c_str());
   if (rc != 0) {
-    std::cerr << "Mount failed: " << rc << std::endl;
+    std::cerr << "Mount failed: " << rc << "\n";
     dingofs_delete(h);
     return 1;
   }
 
-  // Pre-create dir tree serially to avoid MDS TxnWriteConflict
-  dingofs_mkdir(h, FLAGS_bench_dir.c_str(), 0755);
-  for (int i = 0; i < nthreads; i++) {
-    char dir[512];
-    snprintf(dir, sizeof(dir), "%s/%d", FLAGS_bench_dir.c_str(), i);
-    dingofs_mkdir(h, dir, 0755);
+  // Pre-create dir tree serially (only when writing).
+  // In read-only mode, dirs must already exist from a prior prefill run.
+  if (do_prefill) {
+    dingofs_mkdir(h, FLAGS_bench_dir.c_str(), 0755);
+    for (int i = 0; i < nthreads; i++) {
+      char dir[512];
+      (void)snprintf(dir, sizeof(dir), "%s/%d", FLAGS_bench_dir.c_str(), i);
+      dingofs_mkdir(h, dir, 0755);
+    }
   }
 
   size_t total_bytes = static_cast<size_t>(nthreads) * file_size;
 
   // ---- Phase 1: Prefill ----
-  if (!FLAGS_bench_skip_prefill) {
+  if (do_prefill) {
     std::cout << "Phase 1: Prefill " << HumanSize(total_bytes) << " ..."
-              << std::endl;
+              << "\n";
     ProgressTracker prefill_progress(total_bytes, nthreads, "prefill");
 
     std::vector<std::thread> threads;
@@ -446,8 +481,7 @@ int main(int argc, char* argv[]) {
     bool prefill_failed = false;
     for (int i = 0; i < nthreads; i++) {
       if (errors[i] != 0) {
-        std::cerr << "Prefill thread " << i << " failed: " << errors[i]
-                  << std::endl;
+        std::cerr << "Prefill thread " << i << " failed: " << errors[i] << "\n";
         prefill_failed = true;
       }
     }
@@ -460,52 +494,99 @@ int main(int argc, char* argv[]) {
     std::cout << "Prefill done: " << pf_mb << " MB in " << std::fixed
               << std::setprecision(2) << pf_elapsed
               << " s = " << std::setprecision(1) << pf_mb / pf_elapsed
-              << " MB/s" << std::endl;
+              << " MB/s"
+              << "\n";
 
     if (FLAGS_bench_prefill_settle_sec > 0) {
       std::cout << "Settling for " << FLAGS_bench_prefill_settle_sec << " s..."
-                << std::endl;
+                << "\n";
       std::this_thread::sleep_for(
           std::chrono::seconds(FLAGS_bench_prefill_settle_sec));
     }
   }
 
-  // ---- Phase 2: Read ----
-  std::cout << "Phase 2: Read (" << FLAGS_bench_pattern << ") ..." << std::endl;
-  ProgressTracker read_progress(total_bytes, nthreads, "read");
+  // ---- Phase 2: Read (possibly multiple rounds) ----
+  if (!do_read) {
+    if (FLAGS_bench_cleanup) {
+      for (int i = 0; i < nthreads; i++) {
+        char path[512], dir[512];
+        (void)snprintf(path, sizeof(path), "%s/%d/data",
+                       FLAGS_bench_dir.c_str(), i);
+        (void)snprintf(dir, sizeof(dir), "%s/%d", FLAGS_bench_dir.c_str(), i);
+        dingofs_unlink(h, path);
+        dingofs_rmdir(h, dir);
+      }
+      dingofs_rmdir(h, FLAGS_bench_dir.c_str());
+    }
+    dingofs_umount(h);
+    dingofs_delete(h);
+    return 0;
+  }
 
-  std::vector<std::thread> threads;
+  int nrounds = std::max(1, FLAGS_bench_read_rounds);
+  std::vector<double> round_throughputs;
   std::vector<ThreadResult> results(nthreads);
-  double t_start = NowSec();
-  threads.reserve(nthreads);
-  for (int i = 0; i < nthreads; i++) {
-    threads.emplace_back(ReaderThread, h, i, file_size, block_size,
-                         random_pattern, &read_progress, &results[i]);
-  }
-  for (auto& t : threads) t.join();
-  double t_end = NowSec();
-  read_progress.Stop();
-  if (FLAGS_bench_progress) std::cout << "\r" << std::string(80, ' ') << "\r";
-
   bool has_error = false;
-  for (const auto& r : results) {
-    if (r.error_code != 0) has_error = true;
-  }
-
-  double wall_sec = t_end - t_start;
+  double wall_sec = 0;
   double total_data_mb = 0;
-  for (const auto& r : results) {
-    total_data_mb += r.bytes_read / (1024.0 * 1024.0);
+
+  for (int round = 1; round <= nrounds; round++) {
+    std::cout << "Phase 2 Round " << round << "/" << nrounds << ": Read ("
+              << FLAGS_bench_pattern << ") ..."
+              << "\n";
+    ProgressTracker read_progress(total_bytes, nthreads, "read");
+
+    std::vector<std::thread> threads;
+    double t_start = NowSec();
+    threads.reserve(nthreads);
+    for (int i = 0; i < nthreads; i++) {
+      threads.emplace_back(ReaderThread, h, i, file_size, block_size,
+                           random_pattern, &read_progress, &results[i]);
+    }
+    for (auto& t : threads) t.join();
+    double t_end = NowSec();
+    read_progress.Stop();
+    if (FLAGS_bench_progress) std::cout << "\r" << std::string(80, ' ') << "\r";
+
+    double round_wall = t_end - t_start;
+    double round_mb = 0;
+    for (const auto& r : results) {
+      if (r.error_code != 0) has_error = true;
+      round_mb += r.bytes_read / (1024.0 * 1024.0);
+    }
+    double round_mbs = round_mb / round_wall;
+    std::cout << "  Round " << round << ": " << std::fixed
+              << std::setprecision(1) << round_mb << " MB in "
+              << std::setprecision(2) << round_wall
+              << " s = " << std::setprecision(1) << round_mbs << " MB/s"
+              << "\n";
+
+    // Skip first round if configured (warmup)
+    bool skip_this =
+        (round == 1 && nrounds > 1 && FLAGS_bench_skip_first_round);
+    if (!skip_this) {
+      round_throughputs.push_back(round_mbs);
+      wall_sec += round_wall;
+      total_data_mb += round_mb;
+    }
   }
 
-  std::cout << std::endl;
-  std::cout << "=== Results (" << FLAGS_bench_pattern
-            << " read) ===" << std::endl;
+  // Compute median throughput across rounds
+  double median_mbs = 0;
+  if (!round_throughputs.empty()) {
+    std::vector<double> sorted = round_throughputs;
+    std::sort(sorted.begin(), sorted.end());
+    median_mbs = sorted[sorted.size() / 2];
+  }
+
+  std::cout << "\n";
+  std::cout << "=== Results (" << FLAGS_bench_pattern << " read) ==="
+            << "\n";
   std::cout << std::left << std::setw(10) << "Thread" << std::right
             << std::setw(12) << "Read" << std::setw(12) << "Elapsed"
             << std::setw(14) << "Throughput" << std::setw(8) << "Status"
-            << std::endl;
-  std::cout << std::string(56, '-') << std::endl;
+            << "\n";
+  std::cout << std::string(56, '-') << "\n";
   for (const auto& r : results) {
     std::cout << std::left << std::setw(10) << r.thread_id << std::right
               << std::setw(10)
@@ -513,21 +594,31 @@ int main(int argc, char* argv[]) {
               << std::setw(9) << std::fixed << std::setprecision(2)
               << r.elapsed_sec << " s" << std::setw(10) << std::setprecision(1)
               << r.throughput_mbs << " MB/s" << std::setw(8)
-              << (r.error_code == 0 ? "  OK" : "  FAIL") << std::endl;
+              << (r.error_code == 0 ? "  OK" : "  FAIL") << "\n";
   }
-  std::cout << std::string(56, '-') << std::endl;
+  std::cout << std::string(56, '-') << "\n";
+  if (nrounds > 1) {
+    std::cout << "Rounds: " << round_throughputs.size();
+    if (FLAGS_bench_skip_first_round) std::cout << " (skipped warmup round)";
+    std::cout << "\n";
+    std::cout << "Median:    " << std::fixed << std::setprecision(1)
+              << median_mbs << " MB/s"
+              << "\n";
+  }
   std::cout << "Aggregate: " << std::fixed << std::setprecision(1)
             << total_data_mb << " MB in " << std::setprecision(2) << wall_sec
             << " s = " << std::setprecision(1) << total_data_mb / wall_sec
-            << " MB/s" << std::endl;
+            << " MB/s"
+            << "\n";
 
   // ---- Cleanup ----
   if (FLAGS_bench_cleanup) {
     for (int i = 0; i < nthreads; i++) {
       char path[512];
       char dir[512];
-      snprintf(path, sizeof(path), "%s/%d/data", FLAGS_bench_dir.c_str(), i);
-      snprintf(dir, sizeof(dir), "%s/%d", FLAGS_bench_dir.c_str(), i);
+      (void)snprintf(path, sizeof(path), "%s/%d/data", FLAGS_bench_dir.c_str(),
+                     i);
+      (void)snprintf(dir, sizeof(dir), "%s/%d", FLAGS_bench_dir.c_str(), i);
       dingofs_unlink(h, path);
       dingofs_rmdir(h, dir);
     }
