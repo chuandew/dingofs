@@ -398,10 +398,11 @@ Block TierBlockCache::CopyBlock(const Block& block) {
   IOBuffer buffer;
   if (FLAGS_tier_block_cache_bench_skip_copyblock &&
       block.size <= kBenchCopyBufferSize) {
-    // bench-only: skip heap alloc + page faults; still memcpy to satisfy
-    // PutBlockTask::OnPrepare's single-contiguous-block requirement. Data
-    // integrity is broken under concurrency — do not use in production.
-    block.buffer.CopyTo(kBenchCopyBuffer);
+    // bench-only: skip both heap alloc AND the block.buffer.CopyTo() memcpy.
+    // The returned Block still satisfies PutBlockTask::OnPrepare's single-
+    // contiguous-block requirement (one backing block via AppendUserData) but
+    // its content is stale/shared — only valid with fake accesser that never
+    // reads the data.
     buffer.AppendUserData(kBenchCopyBuffer, block.size, BenchCopyNoopDeleter);
   } else {
     char* data = new char[block.size];

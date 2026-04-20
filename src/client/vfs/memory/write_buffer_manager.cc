@@ -17,13 +17,61 @@
 #include "client/vfs/memory/write_buffer_manager.h"
 
 #include <fmt/format.h>
+#include <gflags/gflags.h>
 #include <glog/logging.h>
 
+#include <cstdlib>
+#include <mutex>
+#include <vector>
+
 #include "common/helper.h"
+
+DEFINE_bool(vfs_write_buffer_bench_pool, false,
+            "[bench] serve WriteBufferManager::Allocate from a pre-touched "
+            "slab pool so the allocation never hits virgin memory; isolates "
+            "per-page new char[page_size] cost and its page-fault storm on "
+            "the write hot path. Bench only — pool is lazily initialized on "
+            "first call and never grows.");
 
 namespace dingofs {
 namespace client {
 namespace vfs {
+
+namespace {
+
+// Thread-local slab pool: each thread has its own ring of pages so memcpy to a
+// returned page hits cache lines only this thread owns — no cross-core cache
+// ping-pong that a shared pool would cause at 32T concurrency.
+//
+// ThreadSlab is a thread_local vector-plus-counter; the first Allocate() in a
+// thread lazily pre-allocates kPagesPerThread slots and pre-touches each page.
+// Thread-local ring of pages; slots are allocated lazily on first use so we
+// don't pay a pre-touch tax at startup. After the first pass through the ring
+// all slots are warm and reused.
+constexpr size_t kPagesPerThread = 256;  // 16 MB per thread at page_size=64 KB
+
+struct ThreadSlab {
+  std::array<char*, kPagesPerThread> slots{};
+  size_t next{0};
+};
+
+thread_local ThreadSlab* tls_slab = nullptr;
+
+char* BenchPoolAllocate(size_t page_size) {
+  if (tls_slab == nullptr) {
+    tls_slab = new ThreadSlab();
+  }
+  size_t idx = tls_slab->next++ % tls_slab->slots.size();
+  char* p = tls_slab->slots[idx];
+  if (p == nullptr) {
+    p = static_cast<char*>(std::malloc(page_size));
+    CHECK(p != nullptr) << "BenchPool malloc failed";
+    tls_slab->slots[idx] = p;
+  }
+  return p;
+}
+
+}  // namespace
 
 WriteBufferManager::WriteBufferManager(int64_t total_bytes, int64_t page_size)
     : total_bytes_(total_bytes),
@@ -34,6 +82,11 @@ WriteBufferManager::WriteBufferManager(int64_t total_bytes, int64_t page_size)
 }
 
 char* WriteBufferManager::Allocate() {
+  if (FLAGS_vfs_write_buffer_bench_pool) {
+    used_pages_.fetch_add(1);
+    return BenchPoolAllocate(page_size_);
+  }
+
   butil::Timer timer;
   timer.start();
   char* page = new char[page_size_];
@@ -47,6 +100,12 @@ char* WriteBufferManager::Allocate() {
 }
 
 void WriteBufferManager::DeAllocate(char* page) {
+  if (FLAGS_vfs_write_buffer_bench_pool) {
+    // Pool owns the memory; noop.
+    used_pages_.fetch_sub(1);
+    return;
+  }
+
   butil::Timer timer;
   timer.start();
   delete[] page;
