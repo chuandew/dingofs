@@ -73,33 +73,34 @@ class FileReader {
   int64_t UsedMem() const;
   double UsedRatio() const;
 
-  // pretected by mutex_
+  // Posts DoReadRequst to the read executor; takes no locks itself.
   void RunReadRequest(ReadRequestSptr req);
+  // Run on executor threads WITHOUT mutex_; they only take req->mutex. This is
+  // why cleanup eligibility must be re-established under mutex_ before erase.
   void OnReadRequestComplete(ReadRequestSptr req, Status s);
-  // pretected by mutex_
   void DoReadRequst(ReadRequestSptr req);
 
-  // pretected by mutex_
+  // Caller must hold mutex_.
   ReadRequestSptr NewReadRequest(int64_t s, int64_t e);
-  // pretected by mutex_
+  // Caller must hold mutex_.
   void DeleteReadRequestUnlock(ReadRequestSptr req);
   void DeleteReadRequest(ReadRequestSptr req);
   void ScheduleReadRequestCleanup(ReadRequestSptr req);
 
-  // pretected by mutex_
+  // Caller must hold mutex_.
   void CheckReadahead(ContextSPtr ctx, const FileRange& frange, int64_t flen);
-  // pretected by mutex_
+  // Caller must hold mutex_.
   void MakeReadahead(ContextSPtr ctx, const FileRange& frange);
 
-  // pretected by mutex_
+  // Caller must hold mutex_.
   std::vector<int64_t> SplitRange(ContextSPtr ctx, const FileRange& frange);
-  // pretected by mutex_
+  // Caller must hold mutex_.
   std::vector<PartialReadRequest> PrepareRequests(
       ContextSPtr ctx, const std::vector<int64_t>& ranges);
 
-  // pretected by mutex_
+  // Caller must hold mutex_.
   bool IsProtectedReq(const ReadRequestSptr& req) const;
-  // pretected by mutex_
+  // Caller must hold mutex_.
   void CleanUpRequest(ContextSPtr ctx, const FileRange& frange);
 
   Status WaitAllReadRequest(ContextSPtr ctx,
@@ -125,8 +126,6 @@ class FileReader {
   // seq -> ReadRequestSptr
   std::map<int64_t, ReadRequestSptr> requests_;
 };
-
-using FileReaderUPtr = std::unique_ptr<FileReader>;
 
 }  // namespace vfs
 }  // namespace client

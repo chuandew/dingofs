@@ -19,10 +19,13 @@
 
 #include <algorithm>
 #include <atomic>
+#include <condition_variable>
 #include <cstdint>
 #include <cstring>
+#include <future>
 #include <memory>
 #include <mutex>
+#include <thread>
 
 #include "client/vfs/data/reader/file_reader.h"
 #include "client/vfs/data_buffer.h"
@@ -488,6 +491,270 @@ TEST_F(FileReaderTest, Read_PoolExhausted_ReturnsOutOfMemory) {
 
   CloseAndRelease(r);
   FLAGS_vfs_read_mempool_backpressure_watermark = saved_wm;
+}
+
+// ---------------------------------------------------------------------------
+// Concurrency coverage. Methodology: a "gated" RangeAsync mock blocks the
+// first matching callback on a test-controlled latch, turning racy windows
+// (request kBusy, foreground waiting) into deterministic interleavings
+// without touching production code.
+// ---------------------------------------------------------------------------
+
+namespace {
+
+// One non-hole slice covering the whole 4 MiB file so reads consult the
+// block store instead of zero-filling holes.
+void InstallFullSlice(test::MockMetaSystem* meta) {
+  ON_CALL(*meta, ReadSlice)
+      .WillByDefault([](ContextSPtr, Ino, uint64_t, uint64_t,
+                        std::vector<Slice>* s, uint64_t& v) {
+        s->clear();
+        Slice sl;
+        sl.id = 1;
+        sl.pos = 0;
+        sl.size = 4 * 1024 * 1024;
+        sl.off = 0;
+        sl.len = sl.size;
+        s->push_back(sl);
+        v = 1;
+        return Status::OK();
+      });
+}
+
+// Latch that blocks the first RangeAsync matching (offset, length); later
+// calls (and all non-matching calls) complete inline with zero-filled data.
+struct RangeGate {
+  std::mutex mu;
+  std::condition_variable cv;
+  bool released{false};
+  std::promise<void> entered;
+
+  void WaitEntered() { entered.get_future().wait(); }
+
+  void Release() {
+    {
+      std::lock_guard<std::mutex> lk(mu);
+      released = true;
+    }
+    cv.notify_all();
+  }
+};
+
+}  // namespace
+
+// 15. Regression for the request birth-window race: a request must not become
+// runnable before its creator registered a reference. With an inline-error
+// BlockStore the completion path fires as early as possible; pre-fix this
+// crashed CHECK(CanDeleteRequest) within a few hundred iterations on 2 cores.
+TEST_F(FileReaderTest, Read_RepeatedInlineError_NoCleanupRace) {
+  InstallFullSlice(mock_meta_system_);
+  ON_CALL(*mock_block_store_, RangeAsync)
+      .WillByDefault([](ContextSPtr, RangeReq, StatusCallback cb) {
+        cb(Status::IoError("inline failure"));
+      });
+
+  auto* r = MakeOpenReader();
+  for (int i = 0; i < 200; ++i) {
+    DataBuffer buf;
+    uint64_t rsize = 0;
+    Status s = r->Read(ctx_, &buf, 4096, /*offset=*/0, &rsize);
+    ASSERT_FALSE(s.ok()) << "iter=" << i;
+  }
+  CloseAndRelease(r);
+}
+
+// 16. Invalidate() on a kBusy request must trigger a re-read (kRefresh ->
+// kNew -> second RangeAsync) instead of serving the raced data.
+TEST_F(FileReaderTest, Invalidate_BusyRequest_RefreshRereads) {
+  InstallFullSlice(mock_meta_system_);
+
+  // Gate only the first fetch of the foreground request (offset 0, 4 KiB) so
+  // an ungated readahead fetch cannot steal the latch and let the read finish
+  // before Invalidate() lands on the kBusy request.
+  auto gate = std::make_shared<RangeGate>();
+  auto target_calls = std::make_shared<std::atomic<int>>(0);
+  ON_CALL(*mock_block_store_, RangeAsync)
+      .WillByDefault(
+          [gate, target_calls](ContextSPtr, RangeReq req, StatusCallback cb) {
+            bool is_target = (req.offset == 0 && req.length == 4096);
+            if (is_target && target_calls->fetch_add(1) == 0) {
+              gate->entered.set_value();
+              std::unique_lock<std::mutex> lk(gate->mu);
+              gate->cv.wait(lk, [&] { return gate->released; });
+            }
+            if (req.dst.base != nullptr && req.length > 0) {
+              std::memset(req.dst.data(), 0, req.length);
+            }
+            cb(Status::OK());
+          });
+
+  auto* r = MakeOpenReader();
+
+  DataBuffer buf;
+  uint64_t rsize = 0;
+  Status read_status;
+  std::thread reader(
+      [&] { read_status = r->Read(ctx_, &buf, 4096, 0, &rsize); });
+
+  gate->WaitEntered();     // request is kBusy inside RangeAsync
+  r->Invalidate(0, 4096);  // kBusy -> kRefresh
+  gate->Release();         // first read completes, must be discarded
+
+  reader.join();
+  EXPECT_TRUE(read_status.ok()) << read_status.ToString();
+  EXPECT_EQ(rsize, 4096u);
+  // The refreshed request re-fetched its block from the block store.
+  EXPECT_GE(target_calls->load(), 2);
+
+  CloseAndRelease(r);
+}
+
+// 17. Two concurrent reads of the same range share one in-flight request
+// (readers > 1) instead of each fetching the block.
+TEST_F(FileReaderTest, ConcurrentReads_ShareOneRequest) {
+  InstallFullSlice(mock_meta_system_);
+
+  auto gate = std::make_shared<RangeGate>();
+  auto target_calls = std::make_shared<std::atomic<int>>(0);
+  ON_CALL(*mock_block_store_, RangeAsync)
+      .WillByDefault(
+          [gate, target_calls](ContextSPtr, RangeReq req, StatusCallback cb) {
+            bool is_target = (req.offset == 0 && req.length == 4096);
+            if (is_target && target_calls->fetch_add(1) == 0) {
+              gate->entered.set_value();
+              std::unique_lock<std::mutex> lk(gate->mu);
+              gate->cv.wait(lk, [&] { return gate->released; });
+            }
+            if (req.dst.base != nullptr && req.length > 0) {
+              std::memset(req.dst.data(), 0, req.length);
+            }
+            cb(Status::OK());
+          });
+
+  auto* r = MakeOpenReader();
+
+  DataBuffer buf1, buf2;
+  uint64_t rsize1 = 0, rsize2 = 0;
+  Status s1, s2;
+  std::thread t1([&] { s1 = r->Read(ctx_, &buf1, 4096, 0, &rsize1); });
+  gate->WaitEntered();  // request exists and is kBusy
+  std::thread t2([&] { s2 = r->Read(ctx_, &buf2, 4096, 0, &rsize2); });
+
+  // t2 can only attach (IncReader) once it reaches PrepareRequests; give it a
+  // moment, then let the shared fetch finish for both waiters.
+  std::this_thread::sleep_for(std::chrono::milliseconds(50));
+  gate->Release();
+
+  t1.join();
+  t2.join();
+  EXPECT_TRUE(s1.ok()) << s1.ToString();
+  EXPECT_TRUE(s2.ok()) << s2.ToString();
+  EXPECT_EQ(rsize1, 4096u);
+  EXPECT_EQ(rsize2, 4096u);
+  // Exactly one fetch of the shared block: the second read attached to the
+  // in-flight request rather than issuing its own.
+  EXPECT_EQ(target_calls->load(), 1);
+
+  CloseAndRelease(r);
+}
+
+// 18. Close() while a read is blocked waiting for its request must abort the
+// read once the in-flight completion delivers (completion sees closing_ and
+// invalidates even a successful fetch).
+TEST_F(FileReaderTest, Close_WhileWaiting_ReturnsAbort) {
+  InstallFullSlice(mock_meta_system_);
+
+  // Gate only the foreground request (offset 0, 4 KiB): the first read jumps
+  // readahead to level 1, and an ungated readahead fetch must not steal the
+  // latch or the foreground read would complete before Close().
+  auto gate = std::make_shared<RangeGate>();
+  auto target_calls = std::make_shared<std::atomic<int>>(0);
+  ON_CALL(*mock_block_store_, RangeAsync)
+      .WillByDefault(
+          [gate, target_calls](ContextSPtr, RangeReq req, StatusCallback cb) {
+            bool is_target = (req.offset == 0 && req.length == 4096);
+            if (is_target && target_calls->fetch_add(1) == 0) {
+              gate->entered.set_value();
+              std::unique_lock<std::mutex> lk(gate->mu);
+              gate->cv.wait(lk, [&] { return gate->released; });
+            }
+            if (req.dst.base != nullptr && req.length > 0) {
+              std::memset(req.dst.data(), 0, req.length);
+            }
+            cb(Status::OK());
+          });
+
+  auto* r = MakeOpenReader();
+
+  DataBuffer buf;
+  uint64_t rsize = 0;
+  Status read_status;
+  std::thread reader(
+      [&] { read_status = r->Read(ctx_, &buf, 4096, 0, &rsize); });
+
+  gate->WaitEntered();  // foreground is (about to be) parked in the wait loop
+  r->Close();
+  gate->Release();  // completion fires, sees closing_, invalidates
+
+  reader.join();
+  EXPECT_TRUE(read_status.IsAbort()) << read_status.ToString();
+
+  r->ReleaseRef();
+}
+
+// 19. The per-read CleanUpRequest keeps the request table bounded: once more
+// than kMaxReadRequests(64) unprotected requests accumulate, old ones are
+// evicted and a later read of the same range fetches again.
+TEST_F(FileReaderTest, ManySmallReads_EvictionBounded) {
+  InstallFullSlice(mock_meta_system_);
+  // 64 KiB blocks: with the default 4 MiB block the whole file is one block
+  // and IsProtectedReq's window (>= one block around the last offset) would
+  // always cover offset 0, so nothing could ever be evicted.
+  ON_CALL(*mock_hub_, GetFsInfo())
+      .WillByDefault(Return(test::MakeTestFsInfo(4 * 1024 * 1024, 64 * 1024)));
+
+  // Count fetches of the file-offset-0 request only: slice 1 block 0 at
+  // in-block offset 0 (strided reads below alias in-block offset 0 in OTHER
+  // blocks, so match the block identity too).
+  auto offset0_calls = std::make_shared<std::atomic<int>>(0);
+  ON_CALL(*mock_block_store_, RangeAsync)
+      .WillByDefault(
+          [offset0_calls](ContextSPtr, RangeReq req, StatusCallback cb) {
+            if (req.handle.Filename().rfind("1_0_", 0) == 0 &&
+                req.offset == 0 && req.length == 4096) {
+              offset0_calls->fetch_add(1);
+            }
+            if (req.dst.base != nullptr && req.length > 0) {
+              std::memset(req.dst.data(), 0, req.length);
+            }
+            cb(Status::OK());
+          });
+
+  auto* r = MakeOpenReader();
+  DataBuffer first;
+  uint64_t rsize = 0;
+  ASSERT_TRUE(r->Read(ctx_, &first, 4096, /*offset=*/0, &rsize).ok());
+  EXPECT_EQ(offset0_calls->load(), 1);
+
+  // Disjoint 4 KiB reads alternating between a low ([64K, ~1M)) and a high
+  // ([3M, ~4M)) region: every jump exceeds kSeqAccessWindowSize (2 MiB), so
+  // the readahead policy degrades to level 0 after the first hops — no big
+  // readahead request swallows the strides (each read creates its own
+  // request) and IsProtectedReq() protects nothing. That pushes the table
+  // past kMaxReadRequests(64) and lets eviction reclaim the offset-0 entry.
+  for (int i = 0; i < 112; ++i) {
+    DataBuffer buf;
+    int64_t base = (i % 2 == 0) ? 64 * 1024 : 3 * 1024 * 1024;
+    int64_t offset = base + static_cast<int64_t>(i / 2) * 16 * 1024;
+    ASSERT_TRUE(r->Read(ctx_, &buf, 4096, offset, &rsize).ok()) << i;
+  }
+
+  // The offset-0 request was evicted, so this read must fetch again.
+  DataBuffer again;
+  ASSERT_TRUE(r->Read(ctx_, &again, 4096, /*offset=*/0, &rsize).ok());
+  EXPECT_EQ(offset0_calls->load(), 2);
+
+  CloseAndRelease(r);
 }
 
 }  // namespace vfs
