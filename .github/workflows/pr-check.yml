@@ -83,7 +83,19 @@ jobs:
 
           # Run client unit tests. Other suites (mds, cache) are out of scope
           # for this job and can be enabled here as they stabilize.
+          set +e
           ./build/bin/test/test_client --gtest_color=yes
+          rc=\$?
+          set -e
+          if [ \$rc -ne 0 ]; then
+              echo "=== test_client exited \$rc; re-running under gdb for backtrace ==="
+              source /opt/rh/gcc-toolset-13/enable 2>/dev/null || true
+              gdb -batch -ex 'set pagination off' -ex 'handle SIGSEGV stop print pass' \
+                  -ex run -ex 'bt 40' -ex 'info registers' \
+                  --args ./build/bin/test/test_client --gtest_color=yes \
+                  2>&1 | tail -120
+              exit \$rc
+          fi
           EOF
           chmod +x /mnt/dingofs/test.sh
 
