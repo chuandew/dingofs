@@ -106,6 +106,7 @@ int main(int argc, char** argv) {
     default_run_case += ":FsStatsTest.*";
     default_run_case += ":DirStatManagerTest.*";
     default_run_case += ":QuotaTest.*";
+    default_run_case += ":QuotaMetricStarvationTest.*";
 
     // storage
     // NOTE: TikvGoStorageTest/TikvStorageTest require a real TiKV/PD
