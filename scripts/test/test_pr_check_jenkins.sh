@@ -202,8 +202,9 @@ def validate_release_routes(workflow):
         ("refs/heads/main", image_jobs | {"wheels"}),
         ("refs/heads/v5.2", image_jobs),
         ("refs/heads/v5.3", image_jobs),
-        ("refs/tags/v5.2.0", image_jobs | {"wheels", "pypi-publish", "github-release"}),
+        ("refs/tags/v5.2.0", image_jobs | {"github-release"}),
         ("refs/tags/v5.2.0-rc.1", image_jobs | {"wheels", "pypi-publish", "github-release"}),
+        ("refs/tags/v5.2.1", image_jobs | {"wheels", "pypi-publish", "github-release"}),
     ):
         runnable = runnable_jobs(
             workflow,
