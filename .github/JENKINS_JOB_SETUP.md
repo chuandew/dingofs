@@ -1,6 +1,6 @@
 # Jenkins 回归门禁 Job 配置手册
 
-本文用于配置 DingoFS Merge Queue 的 Jenkins 回归 Job。配置 Jenkins 本身不要求代码已经提交；真正的 GitHub Actions → Jenkins → Merge Queue 全链路，需要相关 workflow 和 trigger 进入受保护的 `main` 后才能验证。
+本文用于配置 DingoFS `main` 分支 Merge Queue 的 Jenkins 回归 Job。配置 Jenkins 本身不要求代码已经提交；真正的 GitHub Actions → Jenkins → Merge Queue 全链路，需要相关 workflow 和 trigger 进入受保护的 `main` 后才能验证。`release-*` 维护分支暂不接入 Jenkins，只运行 `unit-test`、`build`、`e2e`；不要将本手册的 Jenkins Required check 或 Environment 白名单直接应用到维护分支。
 
 ## 1. 固定配置
 
@@ -522,7 +522,7 @@ JENKINS_API_TOKEN=<服务账号 API token>
 因此不能先用 Ruleset Insights 观察再上线；必须先以 `Disabled` 保存完整规则，
 完成静态核对后切换为 `Active`，再用专门的 fork 测试 PR 验收。
 
-workflow 已经实现触发语义，不需要配置 webhook：
+以下两条并行链路仅适用于目标为 `main` 的 Merge Queue。`release-*` 的 merge group 只运行 `unit-test` → `build` → `e2e`，`jenkins-regression` 跳过；其保护规则不要求 Jenkins。workflow 已经实现触发语义，不需要配置 webhook：
 
 - 普通 PR 触发 `pull_request`，`unit-test`、`build`、`e2e` 和
   `jenkins-regression` 全部为 skipped；
@@ -532,8 +532,8 @@ workflow 已经实现触发语义，不需要配置 webhook：
 - `merge_group` 对重新合并后的 SHA 同时启动两条链路：
 
 ```text
-unit-test → build → e2e
-jenkins-regression → Jenkins Job
+unit-test -> build -> e2e
+jenkins-regression -> Jenkins Job
 ```
 
 `jenkins-regression` 与 `unit-test` 同时开始，不等待 `build` 或 `e2e`；
