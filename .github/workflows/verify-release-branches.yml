@@ -1,0 +1,326 @@
+# Fork-only execution harness. Excluded from the upstream PR.
+name: Fork release CI verification
+'on':
+  push:
+    branches:
+    - ci/verify-release-branches
+permissions:
+  contents: read
+  pull-requests: read
+env:
+  HISTFILE: /dev/null
+defaults:
+  run:
+    shell: bash --noprofile --norc +o history -e -o pipefail {0}
+jobs:
+  routing:
+    runs-on: ubuntu-latest
+    steps:
+    - uses: actions/checkout@v4
+      with:
+        ref: 362a92749d702ee36f41389005dc5226a2e0df2e
+        persist-credentials: false
+    - name: Confirm exact candidate and run contract
+      run: |
+        test "$(git rev-parse HEAD)" = "362a92749d702ee36f41389005dc5226a2e0df2e"
+        bash scripts/test/test_pr_check_jenkins.sh
+        echo "Candidate: 362a92749d702ee36f41389005dc5226a2e0df2e" >> "$GITHUB_STEP_SUMMARY"
+        echo "Fork push probe, not a native merge_group run. Jenkins is not invoked." >> "$GITHUB_STEP_SUMMARY"
+    - name: Evaluate production job gates in GitHub expression engine
+      env:
+        GATE_PR_MAIN_UNIT_TEST: ${{ 'pull_request' == 'merge_group' }}
+        GATE_PR_MAIN_BUILD: ${{ 'pull_request' == 'merge_group' }}
+        GATE_PR_MAIN_E2E: ${{ 'pull_request' == 'merge_group' }}
+        GATE_PR_MAIN_JENKINS_REGRESSION: ${{ '' != 'false' && 'pull_request' == 'merge_group' && '' == 'refs/heads/main'
+          }}
+        GATE_PR_RELEASE_UNIT_TEST: ${{ 'pull_request' == 'merge_group' }}
+        GATE_PR_RELEASE_BUILD: ${{ 'pull_request' == 'merge_group' }}
+        GATE_PR_RELEASE_E2E: ${{ 'pull_request' == 'merge_group' }}
+        GATE_PR_RELEASE_JENKINS_REGRESSION: ${{ '' != 'false' && 'pull_request' == 'merge_group' && '' == 'refs/heads/main'
+          }}
+        GATE_QUEUE_MAIN_UNIT_TEST: ${{ 'merge_group' == 'merge_group' }}
+        GATE_QUEUE_MAIN_BUILD: ${{ 'merge_group' == 'merge_group' }}
+        GATE_QUEUE_MAIN_E2E: ${{ 'merge_group' == 'merge_group' }}
+        GATE_QUEUE_MAIN_JENKINS_REGRESSION: ${{ '' != 'false' && 'merge_group' == 'merge_group' && 'refs/heads/main'
+          == 'refs/heads/main' }}
+        GATE_QUEUE_RELEASE_UNIT_TEST: ${{ 'merge_group' == 'merge_group' }}
+        GATE_QUEUE_RELEASE_BUILD: ${{ 'merge_group' == 'merge_group' }}
+        GATE_QUEUE_RELEASE_E2E: ${{ 'merge_group' == 'merge_group' }}
+        GATE_QUEUE_RELEASE_JENKINS_REGRESSION: ${{ '' != 'false' && 'merge_group' == 'merge_group' && 'refs/heads/release-5.2'
+          == 'refs/heads/main' }}
+        GATE_QUEUE_DISABLED_UNIT_TEST: ${{ 'merge_group' == 'merge_group' }}
+        GATE_QUEUE_DISABLED_BUILD: ${{ 'merge_group' == 'merge_group' }}
+        GATE_QUEUE_DISABLED_E2E: ${{ 'merge_group' == 'merge_group' }}
+        GATE_QUEUE_DISABLED_JENKINS_REGRESSION: ${{ 'false' != 'false' && 'merge_group' == 'merge_group' && 'refs/heads/main'
+          == 'refs/heads/main' }}
+        EXPECTED_GATES: '{"GATE_PR_MAIN_UNIT_TEST": false, "GATE_PR_MAIN_BUILD": false, "GATE_PR_MAIN_E2E": false,
+          "GATE_PR_MAIN_JENKINS_REGRESSION": false, "GATE_PR_RELEASE_UNIT_TEST": false, "GATE_PR_RELEASE_BUILD":
+          false, "GATE_PR_RELEASE_E2E": false, "GATE_PR_RELEASE_JENKINS_REGRESSION": false, "GATE_QUEUE_MAIN_UNIT_TEST":
+          true, "GATE_QUEUE_MAIN_BUILD": true, "GATE_QUEUE_MAIN_E2E": true, "GATE_QUEUE_MAIN_JENKINS_REGRESSION":
+          true, "GATE_QUEUE_RELEASE_UNIT_TEST": true, "GATE_QUEUE_RELEASE_BUILD": true, "GATE_QUEUE_RELEASE_E2E":
+          true, "GATE_QUEUE_RELEASE_JENKINS_REGRESSION": false, "GATE_QUEUE_DISABLED_UNIT_TEST": true, "GATE_QUEUE_DISABLED_BUILD":
+          true, "GATE_QUEUE_DISABLED_E2E": true, "GATE_QUEUE_DISABLED_JENKINS_REGRESSION": false}'
+      run: |
+        python3 - <<'PY'
+        import json
+        import os
+        expected = json.loads(os.environ['EXPECTED_GATES'])
+        for key, value in expected.items():
+            actual = os.environ[key]
+            assert actual == str(value).lower(), (key, actual, value)
+            print(f'{key}: {actual}')
+        print('PASS: all 20 native expression results match the branch/event/switch contract')
+        PY
+  unit-test:
+    if: '''merge_group'' == ''merge_group'''
+    runs-on: ubuntu-latest
+    steps:
+    - uses: actions/checkout@v4
+      with:
+        ref: 362a92749d702ee36f41389005dc5226a2e0df2e
+        persist-credentials: false
+    - name: Check Jenkins workflow contract
+      run: bash scripts/test/test_pr_check_jenkins.sh
+    - name: Copy dingofs repository
+      run: |
+        echo "Move dingofs repository"
+        sudo cp -r /home/runner/work/dingofs/dingofs /mnt/
+        sudo chown $USER:$USER /mnt/dingofs
+    - name: Configure Docker data-root
+      run: |
+        sudo systemctl stop docker
+        sudo systemctl stop docker.socket
+        sudo mkdir -p /mnt/docker
+        echo '{ "data-root": "/mnt/docker" }' | sudo tee /etc/docker/daemon.json
+        if [ -d /var/lib/docker ]; then
+          sudo mv /var/lib/docker /mnt/docker || true
+        fi
+        sudo systemctl start docker.socket
+        sudo systemctl start docker
+        docker info | grep "Docker Root Dir"
+        df -h
+    - name: Pull dingodatabase/dingo-eureka:rocky9-fs
+      run: docker pull dingodatabase/dingo-eureka:rocky9-fs
+    - name: Resolve dingo-sdk cache key
+      id: sdk-key
+      run: "sdk_sha=$(git ls-remote https://github.com/dingodb/dingo-sdk.git refs/heads/main | cut -f1)\neureka_id=$(docker\
+        \ image inspect --format '{{.Id}}' dingodatabase/dingo-eureka:rocky9-fs | cut -d: -f2 | head -c12)\n# key\
+        \ = \u624B\u52A8\u7248\u672C v1 \xB7 \u6784\u5EFA\u914D\u65B9\u6307\u7EB9(hashFiles) \xB7 eureka \u955C\u50CF\
+        \ ID \xB7 dingo-sdk main SHA\necho \"key=dingo-sdk-v1-${{ hashFiles('.github/scripts/_lib/build-dingo-sdk.sh')\
+        \ }}-${eureka_id}-${sdk_sha}\" >> \"$GITHUB_OUTPUT\"\n"
+    - name: Prepare dingo-sdk cache dir
+      run: sudo mkdir -p /mnt/dingo-sdk && sudo chown "$USER":"$USER" /mnt/dingo-sdk
+    - name: Cache dingo-sdk install
+      uses: actions/cache@v4
+      with:
+        path: /mnt/dingo-sdk
+        key: ${{ steps.sdk-key.outputs.key }}
+    - name: Init test build script
+      run: "cat <<EOF > /mnt/dingofs/test.sh\n#!/bin/bash\nset -x\nset -e\n\n# dingo-sdk \u7F16\u8BD1 + \u7F13\u5B58\
+        \u547D\u4E2D(.cache-complete sentinel)\u903B\u8F91\u62BD\u5230\u5171\u4EAB\u811A\u672C\uFF0C\u5BB9\u5668\
+        \u5185 source\uFF1B\n# \u5176\u5185\u5BB9\u88AB cache key \u7684 hashFiles \u6307\u7EB9\uFF0C\u914D\u65B9\
+        \u4E00\u6539 key \u81EA\u52A8\u5931\u6548\uFF08\u89C1\u4E0A Resolve \u6B65\u9AA4\uFF09\u3002\n# install\
+        \ \u76EE\u5F55\u7531 host /mnt/dingo-sdk \u7F13\u5B58 bind-mount \u8FDB /root/.local/dingo-sdk\u3002\nsource\
+        \ /opt/dingofs/.github/scripts/_lib/build-dingo-sdk.sh\n\ncd /opt/dingofs/\ngit config --global --add safe.directory\
+        \ /opt/dingofs\n\nmake file_dep\n# Debug build with NDEBUG undefined so SyncPoint and TEST_SYNC_POINT\n\
+        # are armed. unit_tests=ON pulls in test/unit/ targets.\nmake file_build only=//src/* release=0 unit_tests=ON\
+        \ build_type=Debug\nif [ \\$? -ne 0 ]; then\n    echo \"build failed\"\n    exit -1\nfi\n\n# Run client\
+        \ unit tests. Other suites (mds, cache) are out of scope\n# for this job and can be enabled here as they\
+        \ stabilize.\n./build/bin/test/test_client --gtest_color=yes\nEOF\nchmod +x /mnt/dingofs/test.sh\n"
+    - name: Build and run unit tests
+      run: |
+        echo "Run DingoFS unit tests"
+        docker run --name unit-test-dingofs --rm \
+          -v /mnt/dingofs:/opt/dingofs/ \
+          -v /mnt/dingo-sdk:/root/.local/dingo-sdk \
+          dingodatabase/dingo-eureka:rocky9-fs /opt/dingofs/test.sh
+    - name: Normalize dingo-sdk cache ownership
+      if: always()
+      run: sudo chown -R "$USER":"$USER" /mnt/dingo-sdk 2>/dev/null || true
+    needs: routing
+  build:
+    needs: unit-test
+    if: '''merge_group'' == ''merge_group'''
+    runs-on: ubuntu-latest
+    steps:
+    - uses: actions/checkout@v4
+      with:
+        ref: 362a92749d702ee36f41389005dc5226a2e0df2e
+        persist-credentials: false
+    - uses: ./.github/actions/build-release
+  e2e:
+    needs: build
+    if: '''merge_group'' == ''merge_group'''
+    runs-on: ubuntu-22.04
+    timeout-minutes: 25
+    steps:
+    - uses: actions/checkout@v4
+      with:
+        ref: 362a92749d702ee36f41389005dc5226a2e0df2e
+        persist-credentials: false
+    - name: Preflight (sysctl + disk)
+      run: bash ${{ github.workspace }}/.github/scripts/_lib/preflight.sh
+    - name: Install host tools (fuse3 + dingocli + uv)
+      run: bash ${{ github.workspace }}/.github/scripts/_lib/install.sh
+    - name: Download dingofs artifact from same-run build
+      uses: actions/download-artifact@v4
+      with:
+        name: dingofs
+        path: ${{ runner.temp }}/dingofs-artifact/
+    - name: Extract dingofs binaries
+      run: "mkdir -p ${{ github.workspace }}/build/bin\nART=${{ runner.temp }}/dingofs-artifact\nif [ -f \"$ART/dingofs.tar.gz\"\
+        \ ]; then\n  tar -xzf \"$ART/dingofs.tar.gz\" -C \"$ART/\"\nfi\nfor bin in dingo-mds dingo-mds-client dingo-client;\
+        \ do\n  f=$(find \"$ART\" -name \"$bin\" -type f -executable | head -1)\n  [ -z \"$f\" ] && { echo \"\u2717\
+        \ $bin not found\"; find \"$ART\" -type f | head -30; exit 1; }\n  cp \"$f\" ${{ github.workspace }}/build/bin/\n\
+        \  chmod +x ${{ github.workspace }}/build/bin/$bin\ndone\n"
+    - name: Pull docker images (minio pinned + dingo-store latest)
+      run: |
+        grep 'image:' ${{ github.workspace }}/.github/scripts/docker-compose.yml \
+          | awk '{print $2}' | sort -u | while read -r img; do
+            docker pull "$img"
+          done
+    - name: Bring up CI stack
+      run: bash ${{ github.workspace }}/.github/scripts/up.sh
+    - name: Deploy dingofs MDS + create fs + mount client
+      run: bash ${{ github.workspace }}/.github/scripts/deploy-mds-client.sh
+    - name: Pre-test glog scan
+      run: bash ${{ github.workspace }}/.github/scripts/_lib/glog-scan.sh
+    - name: Precheck mounted MDS client and bucket
+      run: |
+        mp="$RUNNER_TEMP/dingofs-mount"
+        mountpoint -q "$mp"
+        pid=$(cat "$RUNNER_TEMP/dingofs-runtime/client.pid")
+        [[ "$pid" =~ ^[1-9][0-9]*$ ]]
+        sudo kill -0 "$pid"
+        timeout 15s python3 - "$mp" <<'PY'
+        import os
+        import pathlib
+        import sys
+        path = pathlib.Path(sys.argv[1]) / '.fork-ci-precheck'
+        with path.open('wb') as stream:
+            stream.write(b'fork-ci-precheck')
+            stream.flush()
+            os.fsync(stream.fileno())
+        assert path.read_bytes() == b'fork-ci-precheck'
+        path.unlink()
+        PY
+        docker exec dingofs-ci-minio mc stat local/dingofs-ci
+        bash .github/scripts/_lib/glog-scan.sh
+    - name: Run e2e tests
+      run: |
+        export PATH="$HOME/.local/bin:$PATH"
+        cd ${{ github.workspace }}/test/e2e
+        uv sync
+        uv run pytest -v --tb=short -m "not slow" --mount-point=${{ runner.temp }}/dingofs-mount
+    - name: Collect logs
+      if: always()
+      run: |
+        mkdir -p ${{ runner.temp }}/ci-logs
+        docker logs dingofs-ci-coord > ${{ runner.temp }}/ci-logs/coord.stdout.log 2>&1 || true
+        docker logs dingofs-ci-store > ${{ runner.temp }}/ci-logs/store.stdout.log 2>&1 || true
+        docker logs dingofs-ci-minio > ${{ runner.temp }}/ci-logs/minio.log 2>&1 || true
+        docker exec dingofs-ci-coord tar czf - /opt/dingo-store/dist/coordinator1/log \
+          > ${{ runner.temp }}/ci-logs/coord.glog.tgz 2>/dev/null || true
+        docker exec dingofs-ci-store tar czf - /opt/dingo-store/dist/store1/log \
+          > ${{ runner.temp }}/ci-logs/store.glog.tgz 2>/dev/null || true
+        sudo tar czf ${{ runner.temp }}/ci-logs/dingofs-runtime.tgz \
+          -C ${{ runner.temp }} dingofs-runtime/ 2>/dev/null || true
+    - name: Upload logs artifact
+      if: failure() || cancelled()
+      uses: actions/upload-artifact@v4
+      with:
+        name: ci-logs-${{ github.run_id }}
+        path: ${{ runner.temp }}/ci-logs/
+        retention-days: 7
+    - name: Tear down
+      if: always()
+      run: bash ${{ github.workspace }}/.github/scripts/down.sh || true
+  local-e2e:
+    needs: build
+    runs-on: ubuntu-22.04
+    timeout-minutes: 25
+    steps:
+    - uses: actions/checkout@v4
+      with:
+        ref: 362a92749d702ee36f41389005dc5226a2e0df2e
+        persist-credentials: false
+    - name: Preflight (sysctl + disk)
+      run: bash ${{ github.workspace }}/.github/scripts/_lib/preflight.sh
+    - name: Install host tools (fuse3 + dingocli + uv)
+      run: bash ${{ github.workspace }}/.github/scripts/_lib/install.sh
+    - name: Download dingofs artifact from same-run build
+      uses: actions/download-artifact@v4
+      with:
+        name: dingofs
+        path: ${{ runner.temp }}/dingofs-artifact/
+    - name: Extract dingofs binaries
+      run: "mkdir -p ${{ github.workspace }}/build/bin\nART=${{ runner.temp }}/dingofs-artifact\nif [ -f \"$ART/dingofs.tar.gz\"\
+        \ ]; then\n  tar -xzf \"$ART/dingofs.tar.gz\" -C \"$ART/\"\nfi\nfor bin in dingo-mds dingo-mds-client dingo-client;\
+        \ do\n  f=$(find \"$ART\" -name \"$bin\" -type f -executable | head -1)\n  [ -z \"$f\" ] && { echo \"\u2717\
+        \ $bin not found\"; find \"$ART\" -type f | head -30; exit 1; }\n  cp \"$f\" ${{ github.workspace }}/build/bin/\n\
+        \  chmod +x ${{ github.workspace }}/build/bin/$bin\ndone\n"
+    - name: Mount isolated local filesystem and precheck
+      run: |
+        base="$RUNNER_TEMP/dingofs-local"
+        mp="$RUNNER_TEMP/dingofs-local-mount"
+        mkdir -p "$base/log" "$base/storage" "$mp"
+        sudo env HISTFILE=/dev/null DINGOFS_BASE_DIR="$base"   "$GITHUB_WORKSPACE/build/bin/dingo-client"   "local://ci-local?storage=file&path=$base/storage" "$mp"   --daemonize=true --log_dir="$base/log" --log_level=INFO   --vfs_dummy_server_port=11001 --cache_store=none   --vfs_write_buffer_total_mb=256 --vfs_read_buffer_total_mb=256   --vfs_access_logging=false --vfs_meta_access_logging=false   > "$base/client.stdout" 2>&1
+        for attempt in {1..30}; do
+          if mountpoint -q "$mp"; then break; fi
+          sleep 1
+        done
+        mountpoint -q "$mp"
+        mapfile -t pids < <(sudo pgrep -f "^${GITHUB_WORKSPACE}/build/bin/dingo-client .*${mp}")
+        test "${#pids[@]}" -eq 1
+        printf '%s\n' "${pids[0]}" > "$base/client.pid"
+        sudo kill -0 "${pids[0]}"
+        timeout 15s python3 - "$mp" <<'PY'
+        import os
+        import pathlib
+        import sys
+        path = pathlib.Path(sys.argv[1]) / '.fork-ci-precheck'
+        with path.open('wb') as stream:
+            stream.write(b'fork-ci-precheck')
+            stream.flush()
+            os.fsync(stream.fileno())
+        assert path.read_bytes() == b'fork-ci-precheck'
+        path.unlink()
+        PY
+        sudo env HISTFILE=/dev/null python3 - "$base/log" <<'PY'
+        from collections import deque
+        from pathlib import Path
+        import re
+        import sys
+        logs = list(Path(sys.argv[1]).glob('*INFO*'))
+        assert logs, 'client INFO log missing'
+        for path in logs:
+            with path.open(errors='replace') as stream:
+                recent = ''.join(deque(stream, maxlen=200))
+            assert not re.search(r'NoSuchBucket|Retry upload|CacheUnhealthy|Transport endpoint', recent), path
+        print('PASS: local mount, process, durable write/read and recent client log')
+        PY
+    - name: Run same e2e suite on local mode
+      run: |
+        export PATH="$HOME/.local/bin:$PATH"
+        cd "$GITHUB_WORKSPACE/test/e2e"
+        uv sync
+        uv run pytest -v --tb=short -m "not slow" --mount-point="$RUNNER_TEMP/dingofs-local-mount"
+    - name: Archive local client diagnostics
+      if: failure() || cancelled()
+      run: |
+        sudo tar -czf "$RUNNER_TEMP/local-ci-logs.tar.gz" -C "$RUNNER_TEMP/dingofs-local" log client.stdout
+        sudo chown "$USER:$USER" "$RUNNER_TEMP/local-ci-logs.tar.gz"
+    - name: Upload local diagnostics
+      if: failure() || cancelled()
+      uses: actions/upload-artifact@v4
+      with:
+        name: local-ci-logs
+        path: ${{ runner.temp }}/local-ci-logs.tar.gz
+        retention-days: 7
+    - name: Unmount local filesystem
+      if: always()
+      run: |
+        mp="$RUNNER_TEMP/dingofs-local-mount"
+        if mountpoint -q "$mp"; then
+          sudo fusermount3 -u "$mp" || sudo fusermount3 -uz "$mp"
+        fi
