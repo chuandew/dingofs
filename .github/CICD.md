@@ -1,6 +1,6 @@
 # DingoFS CI/CD
 
-dingofs 使用 GitHub Actions 与 GitHub Merge Queue 验证 `main` 和 `release-*` 维护分支。`main` 额外运行 Jenkins 回归；`release-*` 暂不接入 Jenkins。发布流水仍由 `main` push 或 `v*` 标签触发，不随维护分支 push 发布镜像。
+dingofs 使用 GitHub Actions 与 GitHub Merge Queue 验证 `main` 和 `v5.[0-9]+` 维护分支（如 `v5.2`、`v5.10`）。`main` 额外运行 Jenkins 回归；维护分支暂不接入 Jenkins。发布流水接受上述分支 push 和 `v*` 标签 push；分支镜像与正式版本镜像使用不同标签，维护分支不发布 Python 包。
 
 ---
 
@@ -8,21 +8,21 @@ dingofs 使用 GitHub Actions 与 GitHub Merge Queue 验证 `main` 和 `release-
 
 | 文件 | 触发 | 做什么 |
 |---|---|---|
-| `.github/workflows/pr-check.yml` | 目标为 `main` 或 `release-*` 的 `pull_request` + `merge_group` | 普通 PR 的重检查全部跳过；merge group 顺序执行 `unit-test` → `build` → `e2e`，仅 `main` 的 merge group 并行运行 `jenkins-regression` |
-| `.github/workflows/pr-source.yml` | 目标为 `main` 或 `release-*` 的 `pull_request_target` + `merge_group` | 可选的来源准入提示；`TRUSTED_SOURCE_ENABLED=false` 时跳过，不检出 PR 代码，不替代代码审核 |
-| `.github/workflows/release.yml` | `push: branches:[main]` + `push: tags:['v*']` | 发布流水：build → docker-publish (always) + wheels → pypi-publish (tag only)。**不重测**（信任 merge queue 已守门）|
+| `.github/workflows/pr-check.yml` | 目标为 `main` 或 `v5.[0-9]+` 分支的 `pull_request` + `merge_group` | 普通 PR 的重检查全部跳过；merge group 顺序执行 `unit-test` → `build` → `e2e`，仅 `main` 的 merge group 并行运行 `jenkins-regression` |
+| `.github/workflows/pr-source.yml` | 目标为 `main` 或 `v5.[0-9]+` 分支的 `pull_request_target` + `merge_group` | 可选的来源准入提示；`TRUSTED_SOURCE_ENABLED=false` 时跳过，不检出 PR 代码，不替代代码审核 |
+| `.github/workflows/release.yml` | `push: branches:[main, 'v5.[0-9]+']` + `push: tags:['v*']` | build → docker-publish；wheels 仅 main/tag，pypi-publish 仅 tag。**不重测**，不得以发布成功替代合并前验证 |
 | `.github/actions/build-release/` | composite action（被 pr-check `build` + release `build` 两处 `uses:` 内联）| `dingodatabase/dingo-eureka:rocky9-fs` container 内 Release cmake build，产 `dingofs.tar.gz` artifact。dingo-sdk install 走 `actions/cache`（同 unit-test，见 §8）。**逻辑复用走 composite 而非 `workflow_call`**——后者会让 required check 漂成锚不住的叶子名（见 §8）|
 
 ### Status Check 命名
 
-`main` 和 `release-*` 的 branch protection 都使用以下 **3 个内联 job 裸名**作为 Required status checks：
+`main` 和 `v5.[0-9]+` 维护分支的 branch protection 都使用以下 **3 个内联 job 裸名**作为 Required status checks：
 
 - `unit-test` （pr-check.yml 内联 job）
 - `build` （pr-check.yml 内联 job；构建逻辑 `uses: ./.github/actions/build-release` composite）
 - `e2e` （pr-check.yml 内联 job）
-- `main` 另外要求 `jenkins-regression`；`release-*` 暂不要求，也不会启动该 job。
+- `main` 另外要求 `jenkins-regression`；维护分支暂不要求，也不会启动该 job。
 
-为每条维护分支（例如 `release-5.2`）单独配置对应保护规则与 Merge Queue。workflow 的 `release-*` 只匹配事件目标，不会创建分支、保护规则或队列，也不匹配旧的 `v5.1` 分支。检查的 Expected source 均选择 GitHub Actions。
+为每条维护分支（例如 `v5.2`）单独配置对应保护规则与 Merge Queue。Actions 的 `v5.[0-9]+` 匹配 `v5.<数字>`，不匹配 `v5.2-debug`、`v5.2.0` 或 `v6.0`；不要直接将 Actions glob 复制到语法不同的保护规则中。workflow 不会创建分支、保护规则或队列，旧分支也不会因为主线更新而自动获得这份 workflow；本次不重命名或修改旧 `v5.1` 等分支。检查的 Expected source 均选择 GitHub Actions。
 
 Jenkins 入口同时要求 `merge_group` 事件和 `github.event.merge_group.base_ref == 'refs/heads/main'`，并保留 `JENKINS_REGRESSION_ENABLED` 开关。维护分支不使用 Jenkins Environment，不需要扩展 trigger 或线上 Pipeline 的分支白名单；不要为了维护分支而关闭主线的 Jenkins 开关。
 
@@ -90,7 +90,7 @@ bash .github/scripts/_lib/glog-scan.sh
 
 ### 4.1 PR 流程（pr-check.yml）
 
-1. 开发者提交目标为 `main` 或 `release-*` 的 PR，触发 `pr-check.yml`。
+1. 开发者提交目标为 `main` 或 `v5.[0-9]+` 维护分支的 PR，触发 `pr-check.yml`。
 2. `unit-test`、`build`、`e2e`、`jenkins-regression` 全部跳过；启用时，PR Source 单独执行来源准入提示。
 3. 完成代码审核后加入目标分支的 Merge Queue。
 4. 队列为合并候选触发真实检查，见 4.2。不要把 PR 阶段的 skipped 状态当作回归结果。
@@ -99,39 +99,30 @@ bash .github/scripts/_lib/glog-scan.sh
 
 1. GitHub 将 PR 与目标分支及队列中前序改动组合成 merge group，生成独立的候选 SHA。
 2. `merge_group` 触发 `unit-test`、`build`、`e2e`，后一个 job 依赖前一个成功。
-3. 目标为 `main` 时，`jenkins-regression` 同时开始；目标为 `release-*` 时跳过 Jenkins。
+3. 目标为 `main` 时，`jenkins-regression` 同时开始；目标为维护分支时跳过 Jenkins。
 4. 对应 Required checks 全部成功后合并；失败则退出队列，PR 保持打开。
-5. 合入 `main` 后 push 触发发布流水；合入 `release-*` 不触发发布，仍由维护者打 `v*` 标签发布。
+5. 合入 `main` 或 `v5.[0-9]+` 维护分支后，符合路径过滤的 push 触发分支镜像发布；正式版本仍通过 `v*` 标签发布。
 
 **关键**：queue 出队跑的是 **rebased 新 SHA**——保证 main 上每个 commit 都被测过精确的 merge 后状态。
 
-### 4.3 Release 流程（push main / tag）
+### 4.3 Release 流程（push main / maintenance branch / tag）
 
-```
-PR 通过 queue → merge 入 main → push event 触发
-       OR
-开发者 push tag v* → release.yml 触发
-        ↓
-┌─────────────────────────────────────────────┐
-│  job: build  (uses ./.github/actions/build-release) │
-│        ↓                                     │
-│  ┌─ Docker 链 ─────────────────────┐        │
-│  │ job: docker-publish (内联)      │        │
-│  │   needs: build                  │        │
-│  │   → image push (always)         │        │
-│  └─────────────────────────────────┘        │
-│  ┌─ Pypi 链（独立并行 Docker 链）─┐          │
-│  │ job: wheels (内联 cibuildwheel)│          │
-│  │   → dingofs_whl artifact       │          │
-│  │ job: pypi-publish (内联 twine) │          │
-│  │   needs: wheels                │          │
-│  │   if: startsWith tag           │          │
-│  │   → wheel push (tag only)      │          │
-│  └────────────────────────────────┘          │
-└─────────────────────────────────────────────┘
-```
+1. `main` 或 `v5.[0-9]+` 维护分支 push，或 `v*` 标签 push，触发 `release.yml`。
+2. `build` 使用 `./.github/actions/build-release` 生成本次提交的 artifact；`docker-publish` 只消费同一 run 的 artifact。
+3. Docker 发布到 `dingodatabase/dingofs`，标签规则如下。分支与 Git tag 分别按 `refs/heads/` 和 `refs/tags/` 判断，不混用。
+4. `wheels` 仍仅在 main/tag 构建；`pypi-publish` 仍仅在 tag 发布。维护分支 push 不构建 wheel、不上传 PyPI。
 
-**为什么 release 不重测**：merge queue 已保证入 main 的每个 commit 都被测过精确的 merge 后状态。release 信任这个保证，只负责 build artifact 给 docker/pypi。
+| 触发 ref | Docker image tags |
+|---|---|
+| `refs/heads/main` | `latest`、`<7位SHA>` |
+| `refs/heads/v5.2` | `v5.2-latest`、`v5.2-<7位SHA>` |
+| `refs/heads/v5.3` | `v5.3-latest`、`v5.3-<7位SHA>` |
+| `refs/tags/v5.2.0` | `v5.2.0` |
+| `refs/tags/v5.2.0-rc.1` | `v5.2.0-rc.1` |
+
+分支持续镜像中的 `-latest` 表示该维护分支最新构建，不代表正式发版；不会覆盖主线 `latest`。分支 push 仍遵守现有 `paths-ignore`，纯文档等被忽略的变更不触发发布；tag push 不受路径过滤影响。RC 标签的既有 Docker/PyPI 行为未在本次修改，打 tag 前仍需明确发布策略。
+
+**为什么 release 不重测**：发布流水只负责构建和发布，依赖合并前的队列验证；必须先为维护分支配置保护与 Merge Queue。绕过队列合并或直接打 tag 不会自动补跑回归。
 
 ---
 
@@ -159,8 +150,8 @@ dingo 系自家依赖（dingocli + dingo-store image）日常**不 pin**，跟�
      curl -fsSL ".../releases/download/v5.1.0/dingo" | sha256sum
      → 把 tag + sha256 写回 _lib/install.sh (加 DINGOCLI_TAG + DINGOCLI_SHA256 + sha256sum -c 三行)
 □ 3. 本机 `bash .github/scripts/simulate-locally.sh` 跑 119/119 pass，确认 pin 形态没破东西
-□ 4. 改动落到 release branch (`release/v0.x`) 或直接打 tag 的 commit
-□ 5. push release branch / tag → release.yml 触发 → docker / pypi 发包
+□ 4. 改动落到维护分支（例如 `v5.2`）或直接打 tag 的 commit
+□ 5. push 维护分支 → 发布分支 Docker 镜像；push v* tag → 发布版本 Docker 镜像和 PyPI 包
 □ 6. main 分支保持 unpin 形态不动（release branch/tag 是独立分叉，不 merge 回主干）
 ```
 

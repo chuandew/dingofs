@@ -1,6 +1,6 @@
 # Repository ruleset configuration for this ordinary CI workflow:
 # - main required checks: unit-test, build, e2e, jenkins-regression
-# - release-* required checks: unit-test, build, e2e
+# - v5.[0-9]+ maintenance branches required checks: unit-test, build, e2e
 # - configure merge queue separately for each protected target branch
 # - expected source for each status check: GitHub Actions
 # - do not also add this file as an organization required workflow
@@ -12,9 +12,9 @@ name: PR Check
 
 on:
   pull_request:
-    branches: [main, 'release-*']
+    branches: [main, 'v5.[0-9]+']
   merge_group:
-    branches: [main, 'release-*']
+    branches: [main, 'v5.[0-9]+']
 
 permissions:
   contents: read

@@ -106,15 +106,30 @@ def validate_branch_filters(workflow, events):
         patterns = workflow["on"][event]["branches"]
         for branch, expected in (
             ("main", True),
-            ("release-5.2", True),
-            ("release-5.3", True),
-            ("v5.1", False),
-            ("feature/release-5.2", False),
-            ("release-5.2/topic", False),
+            ("v5.2", True),
+            ("v5.10", True),
+            ("v5.1", True),
+            ("v4.2", False),
+            ("v6.0", False),
+            ("vnext", False),
+            ("v50", False),
+            ("v5-test", False),
+            ("v5.", False),
+            ("v5.2-debug", False),
+            ("v5.2.0", False),
+            ("release-5.2", False),
+            ("feature/v5.2", False),
+            ("v5.2/topic", False),
         ):
-            # GitHub's single-star branch glob does not match a slash.
+            # Model the filters' GitHub glob subset: *, [0-9], and +.
             matched = any(
-                re.fullmatch(re.escape(pattern).replace(r"\*", "[^/]*"), branch)
+                re.fullmatch(
+                    re.escape(pattern)
+                    .replace(r"\*", "[^/]*")
+                    .replace(r"\[0\-9\]", "[0-9]")
+                    .replace(r"\+", "+"),
+                    branch,
+                )
                 for pattern in patterns
             )
             require(
@@ -123,12 +138,26 @@ def validate_branch_filters(workflow, events):
             )
 
 
+def runnable_jobs(workflow, context):
+    runnable = set()
+    for name, job in workflow["jobs"].items():
+        # These gates use string equality, boolean operators and startsWith.
+        # Evaluate their outcomes instead of pinning expression formatting.
+        expression = job.get("if", "True").strip()
+        if expression.startswith("${{") and expression.endswith("}}"):
+            expression = expression[3:-2].strip()
+        expression = expression.replace("&&", " and ").replace("||", " or ")
+        if eval(expression, {"__builtins__": {}}, context):
+            runnable.add(name)
+    return runnable
+
+
 def validate_job_routes(workflow):
     for event, branch, enabled, expected in (
         ("pull_request", "main", "", set()),
-        ("pull_request", "release-5.2", "", set()),
+        ("pull_request", "v5.2", "", set()),
         ("merge_group", "main", "", {"unit-test", "build", "e2e", "jenkins-regression"}),
-        ("merge_group", "release-5.2", "", {"unit-test", "build", "e2e"}),
+        ("merge_group", "v5.2", "", {"unit-test", "build", "e2e"}),
         ("merge_group", "main", "false", {"unit-test", "build", "e2e"}),
     ):
         context = {
@@ -142,21 +171,35 @@ def validate_job_routes(workflow):
             ),
             "vars": SimpleNamespace(JENKINS_REGRESSION_ENABLED=enabled),
         }
-        runnable = set()
-        for name, job in workflow["jobs"].items():
-            # These gates use only string equality and boolean conjunctions.
-            # Evaluate their outcomes instead of pinning expression formatting.
-            expression = job["if"].strip()
-            if expression.startswith("${{") and expression.endswith("}}"):
-                expression = expression[3:-2].strip()
-            expression = expression.replace("&&", " and ").replace("||", " or ")
-            if eval(expression, {"__builtins__": {}}, context):
-                runnable.add(name)
+        runnable = runnable_jobs(workflow, context)
         require(
             runnable == expected,
             f"{event}/{branch}, Jenkins switch={enabled!r}: "
             f"runnable jobs {sorted(runnable)}, expected {sorted(expected)}",
         )
+
+
+def validate_release_routes(workflow):
+    image_jobs = {"build", "docker-publish"}
+    for ref, expected in (
+        ("refs/heads/main", image_jobs | {"wheels"}),
+        ("refs/heads/v5.2", image_jobs),
+        ("refs/heads/v5.3", image_jobs),
+        ("refs/tags/v5.2.0", image_jobs | {"wheels", "pypi-publish"}),
+        ("refs/tags/v5.2.0-rc.1", image_jobs | {"wheels", "pypi-publish"}),
+    ):
+        runnable = runnable_jobs(
+            workflow,
+            {
+                "github": SimpleNamespace(ref=ref),
+                "startsWith": lambda value, prefix: value.lower().startswith(prefix.lower()),
+            },
+        )
+        require(
+            runnable == expected,
+            f"release/{ref}: runnable jobs {sorted(runnable)}, expected {sorted(expected)}",
+        )
+
 
 def validate_source_workflow(workflow):
     require(
@@ -461,6 +504,9 @@ try:
     source = load_workflow(source_path)
     validate_branch_filters(pr_check, ("pull_request", "merge_group"))
     validate_branch_filters(source, ("pull_request_target", "merge_group"))
+    release = load_workflow(root / ".github/workflows/release.yml")
+    validate_branch_filters(release, ("push",))
+    validate_release_routes(release)
     validate_source_workflow(source)
     validate_jenkins_job(pr_check)
     validate_topology_template()
